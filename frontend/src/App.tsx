@@ -1,69 +1,40 @@
-import { useEffect, useState } from "react";
+import { useState, useEffect, useCallback } from "react";
+import ProjectList from "./pages/ProjectList";
+import ProjectDetail from "./pages/ProjectDetail";
+import "./index.css";
 
-interface Health {
-  status: string;
-  service: string;
-  version: string;
-  sandbox_backend: string;
+type Page = { type: "home" } | { type: "project"; id: string };
+
+function useHashRoute(): [Page, (page: Page) => void] {
+  const parse = (): Page => {
+    const hash = window.location.hash.replace(/^#\/?/, "");
+    const match = hash.match(/^projects\/([^/]+)$/);
+    return match ? { type: "project", id: match[1] } : { type: "home" };
+  };
+  const [page, setPage] = useState<Page>(parse);
+  useEffect(() => {
+    const handler = () => setPage(parse());
+    window.addEventListener("hashchange", handler);
+    return () => window.removeEventListener("hashchange", handler);
+  }, []);
+  const navigate = useCallback((p: Page) => {
+    window.location.hash = p.type === "home" ? "/" : "/projects/" + p.id;
+  }, []);
+  return [page, navigate];
 }
 
-function App() {
-  const [health, setHealth] = useState<Health | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetch("/api/health")
-      .then((r) =>
-        r.ok ? (r.json() as Promise<Health>) : Promise.reject(new Error("HTTP " + r.status))
-      )
-      .then(setHealth)
-      .catch((e: Error) => setError(e.message));
-  }, []);
-
+export default function App() {
+  const [page, navigate] = useHashRoute();
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
-      <header className="border-b border-slate-800 px-8 py-6">
-        <h1 className="text-2xl font-bold">Multi-Agent Dev Platform</h1>
-        <p className="mt-1 text-sm text-slate-400">
-          输入软件需求，自动完成 需求分析 → 架构 → 编码 → 测试 → Review → Git 交付 的闭环
-        </p>
+      <header className="sticky top-0 z-50 border-b border-slate-800 bg-slate-950/90 backdrop-blur px-6 py-3 flex items-center gap-4">
+        <button onClick={() => navigate({ type: "home" })} className="text-lg font-bold hover:text-blue-400 transition">MADP</button>
+        <span className="text-xs text-slate-500">Multi-Agent Dev Platform</span>
       </header>
-      <main className="mx-auto max-w-4xl px-8 py-10">
-        <section className="rounded-xl border border-slate-800 bg-slate-900 p-6">
-          <h2 className="mb-3 text-lg font-semibold">系统状态</h2>
-          {error && (
-            <p className="rounded-lg bg-red-950/60 px-4 py-3 text-sm text-red-300">
-              后端未连接：{error}（请先运行 make dev 启动后端）
-            </p>
-          )}
-          {health && (
-            <dl className="grid grid-cols-2 gap-4 text-sm md:grid-cols-4">
-              <div>
-                <dt className="text-slate-500">状态</dt>
-                <dd className="font-mono text-emerald-400">{health.status}</dd>
-              </div>
-              <div>
-                <dt className="text-slate-500">服务</dt>
-                <dd className="font-mono">{health.service}</dd>
-              </div>
-              <div>
-                <dt className="text-slate-500">版本</dt>
-                <dd className="font-mono">{health.version}</dd>
-              </div>
-              <div>
-                <dt className="text-slate-500">沙箱后端</dt>
-                <dd className="font-mono">{health.sandbox_backend}</dd>
-              </div>
-            </dl>
-          )}
-        </section>
-        <p className="mt-8 text-sm text-slate-500">
-          项目列表与项目详情 Dashboard 在 Phase 10 接入（WebSocket 实时 Agent 日志）。
-          架构设计见仓库 docs/architecture.md。
-        </p>
+      <main className="mx-auto max-w-6xl px-4 py-6">
+        {page.type === "home" && <ProjectList onOpen={(id) => navigate({ type: "project", id })} />}
+        {page.type === "project" && <ProjectDetail projectId={page.id} onBack={() => navigate({ type: "home" })} />}
       </main>
     </div>
   );
 }
-
-export default App;

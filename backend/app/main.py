@@ -60,7 +60,9 @@ app.add_middleware(
 
 # 挂载 API 路由
 from app.api.projects import router as projects_router
+from app.api.websocket import router as ws_router
 app.include_router(projects_router)
+app.include_router(ws_router)
 
 
 @app.get("/health", tags=["system"])
