@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>大学生班费管理系统</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 20px;
+        }
+        h2 {
+            color: #555;
+            margin-top: 30px;
+        }
+        .fee-list {
+            margin-top: 20px;
+        }
+        .fee-item {
+            border: 1px solid #ddd;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+            background-color: #fafafa;
+        }
+        .fee-item p {
+            margin: 5px 0;
+        }
+        .fee-item .actions {
+            margin-top: 10px;
+            display: flex;
+            gap: 10px;
+        }
+        button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .btn-primary {
+            background-color: #4CAF50;
+            color: white;
+        }
+        .btn-danger {
+            background-color: #f44336;
+            color: white;
+        }
+        .btn-secondary {
+            background-color: #2196F3;
+            color: white;
+        }
+        button:hover {
+            opacity: 0.9;
+        }
+        form {
+            margin-top: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #555;
+        }
+        input, textarea {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 15px;
+            box-sizing: border-box;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        textarea {
+            height: 80px;
+            resize: vertical;
+        }
+        #error-message {
+            color: #f44336;
+            margin-top: 20px;
+            padding: 10px;
+            border: 1px solid #f44336;
+            border-radius: 4px;
+            background-color: #ffebee;
+            display: none;
+        }
+        #success-message {
+            color: #4CAF50;
+            margin-top: 20px;
+            padding: 10px;
+            border: 1px solid #4CAF50;
+            border-radius: 4px;
+            background-color: #e8f5e9;
+            display: none;
+        }
+        .empty-state {
+            text-align: center;
+            color: #777;
+            padding: 20px;
+        }
+        @media (max-width: 600px) {
+            body {
+                padding: 10px;
+            }
+            .container {
+                padding: 15px;
+            }
+            button {
+                padding: 6px 12px;
+                font-size: 13px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>大学生班费管理系统</h1>
+        
+        <h2>班费记录列表</h2>
+        <div id="fee-list" class="fee-list">
+            <p class="empty-state">加载中...</p>
+        </div>
+        
+        <h2>添加新记录</h2>
+        <form id="add-fee-form">
+            <label for="date">日期：</label>
+            <input type="date" id="date" required>
+            
+            <label for="description">描述：</label>
+            <textarea id="description" placeholder="请输入班费用途描述" required></textarea>
+            
+            <label for="amount">金额（元）：</label>
+            <input type="number" id="amount" step="0.01" min="0" placeholder="0.00" required>
+            
+            <label for="operator">操作人：</label>
+            <input type="text" id="operator" placeholder="请输入操作人姓名" required>
+            
+            <button type="submit" class="btn-primary">添加记录</button>
+        </form>
+        
+        <div id="error-message"></div>
+        <div id="success-message"></div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            fetchFees();
+            document.getElementById('add-fee-form').addEventListener('submit', addFee);
+        });
+
+        // 显示错误消息
+        function showError(message) {
+            const errorDiv = document.getElementById('error-message');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+            setTimeout(() => {
+                errorDiv.style.display = 'none';
+            }, 5000);
+        }
+
+        // 显示成功消息
+        function showSuccess(message) {
+            const successDiv = document.getElementById('success-message');
+            successDiv.textContent = message;
+            successDiv.style.display = 'block';
+            setTimeout(() => {
+                successDiv.style.display = 'none';
+            }, 3000);
+        }
+
+        // 获取所有班费记录
+        async function fetchFees() {
+            const feeList = document.getElementById('fee-list');
+            try {
+                const response = await fetch('/api/fees');
+                if (!response.ok) {
+                    throw new Error(`HTTP错误！状态码: ${response.status}`);
+                }
+                const fees = await response.json();
+                renderFees(fees);
+            } catch (error) {
+                console.error('获取班费记录失败:', error);
+                showError('获取班费记录失败：' + error.message);
+                feeList.innerHTML = '<p class="empty-state">无法加载数据，请检查网络连接。</p>';
+            }
+        }
+
+        // 渲染班费列表
+        function renderFees(fees) {
+            const feeList = document.getElementById('fee-list');
+            feeList.innerHTML = '';
+            
+            if (!fees || fees.length === 0) {
+                feeList.innerHTML = '<p class="empty-state">暂无班费记录。</p>';
+                return;
+            }
+            
+            fees.forEach(fee => {
+                const feeItem = document.createElement('div');
+                feeItem.className = 'fee-item';
+                feeItem.innerHTML = `
+                    <p><strong>日期：</strong>${fee.date || '未设置'}</p>
+                    <p><strong>描述：</strong>${fee.description || '无描述'}</p>
+                    <p><strong>金额：</strong>¥${parseFloat(fee.amount || 0).toFixed(2)}</p>
+                    <p><strong>操作人：</strong>${fee.operator || '未知'}</p>
+                    <div class="actions">
+                        <button class="btn-secondary" onclick="editFee('${fee.id}')">编辑</button>
+                        <button class="btn-danger" onclick="deleteFee('${fee.id}')">删除</button>
+                    </div>
+                `;
+                feeList.appendChild(feeItem);
+            });
+        }
+
+        // 添加新班费记录
+        async function addFee(event) {
+            event.preventDefault();
+            
+            const date = document.getElementById('date').value;
+            const description = document.getElementById('description').value;
+            const amount = document.getElementById('amount').value;
+            const operator = document.getElementById('operator').value;
+            
+            if (!date || !description || !amount || !operator) {
+                showError('请填写所有必填字段。');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/fees', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        date,
+                        description,
+                        amount: parseFloat(amount),
+                        operator
+                    }),
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => null);
+                    throw new Error(errorData?.message || `HTTP错误！状态码: ${response.status}`);
+                }
+                
+                // 添加成功
+                showSuccess('班费记录添加成功！');
+                document.getElementById('add-fee-form').reset();
+                fetchFees(); // 刷新列表
+            } catch (error) {
+                console.error('添加班费记录失败:', error);
+                showError('添加班费记录失败：' + error.message);
+            }
+        }
+
+        // 删除班费记录
+        async function deleteFee(id) {
+            if (!confirm('确定要删除这条班费记录吗？此操作不可撤销。')) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/fees/${id}`, {
+                    method: 'DELETE',
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => null);
+                    throw new Error(errorData?.message || `HTTP错误！状态码: ${response.status}`);
+                }
+                
+                // 删除成功
+                showSuccess('班费记录已成功删除！');
+                fetchFees(); // 刷新列表
+            } catch (error) {
+                console.error('删除班费记录失败:', error);
+                showError('删除班费记录失败：' + error.message);
+            }
+        }
+
+        // 编辑班费记录（简化版，仅显示提示）
+        function editFee(id) {
+            // 在实际应用中，这里可以跳转到编辑页面或显示编辑模态框
+            // 为简化实现，仅显示提示信息
+            alert(`编辑功能暂未完全实现。记录ID: ${id}\n在实际项目中，这里会打开编辑界面。`);
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,165 @@
+{
+  "project": {
+    "status": "running",
+    "pm_output": {
+      "project_name": "大学生班费管理系统",
+      "description": "一款面向大学班级的班费收支管理工具，支持成员管理、收支记录、实时余额统计及账单查询。",
+      "requirements": [
+        {
+          "id": "FR-1",
+          "type": "functional",
+          "description": "支持班级成员的添加、删除和查询功能。",
+          "priority": "high"
+        },
+        {
+          "id": "FR-2",
+          "type": "functional",
+          "description": "支持记录班费收入，包括班费收取、活动退款等类型。",
+          "priority": "high"
+        },
+        {
+          "id": "FR-3",
+          "type": "functional",
+          "description": "支持记录班费支出，包括活动支出、物资采购等类型。",
+          "priority": "high"
+        },
+        {
+          "id": "FR-4",
+          "type": "functional",
+          "description": "支持实时统计并显示班级当前余额。",
+          "priority": "high"
+        },
+        {
+          "id": "FR-5",
+          "type": "functional",
+          "description": "支持记录并查看详细的收入和支出明细。",
+          "priority": "high"
+        },
+        {
+          "id": "FR-6",
+          "type": "functional",
+          "description": "支持账单（收支记录）的查询，可根据时间和类型进行筛选。",
+          "priority": "medium"
+        },
+        {
+          "id": "NFR-1",
+          "type": "non_functional",
+          "description": "系统需保证数据安全，防止未授权的访问和篡改。",
+          "priority": "high"
+        },
+        {
+          "id": "NFR-2",
+          "type": "non_functional",
+          "description": "查询操作（如成员查询、账单筛选）需在1秒内响应。",
+          "priority": "medium"
+        },
+        {
+          "id": "NFR-3",
+          "type": "non_functional",
+          "description": "用户界面需简洁直观，易于大学生理解和操作。",
+          "priority": "medium"
+        },
+        {
+          "id": "NFR-4",
+          "type": "non_functional",
+          "description": "代码结构清晰，注释完整，便于后续功能扩展和维护。",
+          "priority": "low"
+        },
+        {
+          "id": "NFR-5",
+          "type": "non_functional",
+          "description": "具备数据备份和恢复机制，防止数据丢失。",
+          "priority": "medium"
+        }
+      ],
+      "acceptance_criteria": [
+        "能够成功添加新成员，并在成员列表中查看；能够删除指定成员。",
+        "能够成功添加一笔收入/支出记录，记录后系统余额自动更新。",
+        "能够实时查看班级当前余额和详细的收支明细列表。",
+        "能够通过选择时间范围或收支类型，成功筛选并查看符合条件的账单记录。",
+        "普通用户无法访问或修改非本班的数据。",
+        "系统核心操作在常规负载下响应迅速，无明显延迟。"
+      ],
+      "tasks": [
+        {
+          "role": "architect",
+          "title": "系统架构与数据库设计",
+          "description": "设计系统整体架构（如前后端分离），规划数据库表结构（成员、收支记录、班级等），定义核心API接口。",
+          "depends_on": []
+        },
+        {
+          "role": "backend",
+          "title": "后端功能开发",
+          "description": "根据架构设计，实现成员管理、收支记录的增删查改API，实现余额自动计算和账单筛选查询逻辑。",
+          "depends_on": [
+            "architect"
+          ]
+        },
+        {
+          "role": "frontend",
+          "title": "前端界面开发",
+          "description": "根据接口文档，开发成员管理、收支记录、余额显示和账单查询等页面，实现用户交互。",
+          "depends_on": [
+            "architect"
+          ]
+        },
+        {
+          "role": "test",
+          "title": "集成与功能测试",
+          "description": "对前后端集成后的系统进行测试，验证所有功能需求（如增删改查、余额计算、筛选查询）是否正确实现。",
+          "depends_on": [
+            "backend",
+            "frontend"
+          ]
+        },
+        {
+          "role": "review",
+          "title": "代码审查",
+          "description": "审查后端与前端代码的质量、规范性、安全性和性能，确保符合项目要求。",
+          "depends_on": [
+            "test"
+          ]
+        },
+        {
+          "role": "git",
+          "title": "Git 提交与部署",
+          "description": "将所有经过审查的代码合并到main分支，并准备部署说明。",
+          "depends_on": [
+            "review"
+          ]
+        }
+      ]
+    },
+    "project_name": "大学生班费管理系统"
+  },
+  "tasks": {},
+  "agents": {
+    "pm": [
+      {
+        "task_id": "demo-1786967084-pm-0",
+        "status": "success",
+        "duration_ms": 43677,
+        "error": null,
+        "ts": "2026-08-17T11:45:28.197309+00:00"
+      }
+    ],
+    "architect": [
+      {
+        "task_id": "demo-1786967084-architect-0",
+        "status": "success",
+        "duration_ms": 105529,
+        "error": null,
+        "ts": "2026-08-17T11:47:13.767412+00:00"
+      }
+    ],
+    "backend": [
+      {
+        "task_id": "demo-1786967084-backend-1",
+        "status": "success",
+        "duration_ms": 146427,
+        "error": null,
+        "ts": "2026-08-17T11:49:40.211137+00:00"
+      }
+    ]
+  }
+}

@@ -1,0 +1,146 @@
+{
+  "project": {
+    "status": "running",
+    "pm_output": {
+      "project_name": "大学生班费管理系统",
+      "description": "一个用于管理大学生班级费用的系统，支持成员管理、收支记录、余额统计和账单查询。",
+      "requirements": [
+        {
+          "id": "FR-1",
+          "type": "functional",
+          "description": "支持班级成员的添加、删除和查询功能。",
+          "priority": "high"
+        },
+        {
+          "id": "FR-2",
+          "type": "functional",
+          "description": "记录收入事件，如班费收取和活动退款。",
+          "priority": "high"
+        },
+        {
+          "id": "FR-3",
+          "type": "functional",
+          "description": "记录支出事件，如活动支出和物资采购。",
+          "priority": "high"
+        },
+        {
+          "id": "FR-4",
+          "type": "functional",
+          "description": "实时计算和显示班费余额及收支明细。",
+          "priority": "high"
+        },
+        {
+          "id": "FR-5",
+          "type": "functional",
+          "description": "支持按时间和类型筛选账单进行查询。",
+          "priority": "medium"
+        },
+        {
+          "id": "NFR-1",
+          "type": "non_functional",
+          "description": "系统应具有用户友好的界面，易于大学生使用。",
+          "priority": "medium"
+        },
+        {
+          "id": "NFR-2",
+          "type": "non_functional",
+          "description": "确保数据安全，防止未授权访问和数据丢失。",
+          "priority": "high"
+        },
+        {
+          "id": "NFR-3",
+          "type": "non_functional",
+          "description": "系统响应迅速，余额计算实时准确。",
+          "priority": "medium"
+        }
+      ],
+      "acceptance_criteria": [
+        "用户能够成功添加、删除和查询班级成员信息。",
+        "收入记录能正确保存，并实时更新余额。",
+        "支出记录能正确保存，并实时更新余额。",
+        "系统显示准确的实时余额和详细的收支明细。",
+        "账单查询功能能按指定时间范围和类型正确筛选结果。"
+      ],
+      "tasks": [
+        {
+          "role": "architect",
+          "title": "系统架构设计",
+          "description": "设计系统整体架构、数据库模式和API接口。",
+          "depends_on": []
+        },
+        {
+          "role": "backend",
+          "title": "后端开发",
+          "description": "实现后端业务逻辑、API端点和数据存储。",
+          "depends_on": [
+            "architect"
+          ]
+        },
+        {
+          "role": "frontend",
+          "title": "前端开发",
+          "description": "开发用户界面，实现与后端的交互。",
+          "depends_on": [
+            "architect"
+          ]
+        },
+        {
+          "role": "test",
+          "title": "系统测试",
+          "description": "编写和执行测试用例，确保功能正确。",
+          "depends_on": [
+            "backend",
+            "frontend"
+          ]
+        },
+        {
+          "role": "review",
+          "title": "代码审查",
+          "description": "审查全部代码质量，确保符合标准。",
+          "depends_on": [
+            "test"
+          ]
+        },
+        {
+          "role": "git",
+          "title": "Git 提交",
+          "description": "合并分支到 main，准备部署。",
+          "depends_on": [
+            "review"
+          ]
+        }
+      ]
+    },
+    "project_name": "大学生班费管理系统"
+  },
+  "tasks": {},
+  "agents": {
+    "pm": [
+      {
+        "task_id": "demo-1786966765-pm-0",
+        "status": "success",
+        "duration_ms": 45234,
+        "error": null,
+        "ts": "2026-08-17T11:40:10.550230+00:00"
+      }
+    ],
+    "architect": [
+      {
+        "task_id": "demo-1786966765-architect-0",
+        "status": "success",
+        "duration_ms": 123635,
+        "error": null,
+        "ts": "2026-08-17T11:42:14.211781+00:00"
+      }
+    ],
+    "frontend": [
+      {
+        "task_id": "demo-1786966765-frontend-2",
+        "status": "success",
+        "duration_ms": 111025,
+        "error": null,
+        "ts": "2026-08-17T11:44:05.254698+00:00"
+      }
+    ]
+  }
+}

@@ -57,7 +57,7 @@ class FrontendAgent(BaseAgent):
             ]
 
             schema = {"type": "object", "required": ["files"]}
-            result = await self._llm.generate_json(messages, schema=schema, max_tokens=8000)
+            result = await self._llm.generate_json(messages, schema=schema, max_tokens=6000)
 
             ws = Path(ctx.workspace_path) / "src" / "frontend"
             ws.mkdir(parents=True, exist_ok=True)

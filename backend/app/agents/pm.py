@@ -72,7 +72,7 @@ class PMAgent(BaseAgent):
                 },
             }
 
-            result = await self._llm.generate_json(messages, schema=schema, max_tokens=2000)
+            result = await self._llm.generate_json(messages, schema=schema, max_tokens=8000)
 
             # 验证 tasks 结构
             tasks = result.get("tasks", [])

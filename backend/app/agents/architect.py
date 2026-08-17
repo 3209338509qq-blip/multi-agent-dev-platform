@@ -83,7 +83,7 @@ class ArchitectAgent(BaseAgent):
                 "required": ["tech_stack", "api_design", "database_schema", "architecture_doc"],
             }
 
-            result = await self._llm.generate_json(messages, schema=schema, max_tokens=4000)
+            result = await self._llm.generate_json(messages, schema=schema, max_tokens=8000)
 
             # 写 architecture.md 到工作区
             ws_path = Path(ctx.workspace_path)

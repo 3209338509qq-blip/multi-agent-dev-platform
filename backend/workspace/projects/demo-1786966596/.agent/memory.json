@@ -1,0 +1,32 @@
+{
+  "project": {
+    "status": "running",
+    "final_status": "failed"
+  },
+  "tasks": {},
+  "agents": {
+    "pm": [
+      {
+        "task_id": "demo-1786966596-pm-0",
+        "status": "failed",
+        "duration_ms": 42853,
+        "error": "LLM output is not valid JSON: Expecting property name enclosed in double quotes: line 88 column 21 (char 1967)\nRaw: {\n  \"project_name\": \"大学生班费管理系统\",\n  \"description\": \"一个用于管理大学生班级财务的系统，支持成员管理、收支记录、余额统计和账单查询。\",\n  \"requirements\": [\n    {\n      \"id\": \"FR-1\",\n      \"type\": \"functional\",\n      \"description\": \"支持班级成员的添加、删除和查询操作。\",\n      \"priority\": \"high\"\n    },\n    {\n      \"id\": \"FR-2\",\n      \"type\": \"functional\",\n      \"description\": \"记录所有收入事件，如班费收取和活动退款。\",\n      \"priority\": \"high\"\n    },\n    {\n      \"id\": \"FR-3\",\n      \"type\": \"functional\",\n      \"description\": \"记录所有支出事件，如活动支出和物资采购。\",\n      \"priority\": \"high\"\n   ",
+        "ts": "2026-08-17T11:37:19.947833+00:00"
+      },
+      {
+        "task_id": "demo-1786966596-pm-0",
+        "status": "failed",
+        "duration_ms": 42421,
+        "error": "LLM output is not valid JSON: Expecting ',' delimiter: line 28 column 103 (char 1883)\nRaw: {\n  \"project_name\": \"大学生班费管理系统\",\n  \"description\": \"一个用于管理大学生班费的系统，支持班级成员管理、收支记录、余额统计和账单查询。\",\n  \"requirements\": [\n    {\"id\": \"FR-1\", \"type\": \"functional\", \"description\": \"支持班级成员管理，包括添加、删除和查询成员功能。\", \"priority\": \"high\"},\n    {\"id\": \"FR-2\", \"type\": \"functional\", \"description\": \"支持收入记录，如班费收取和活动退款。\", \"priority\": \"high\"},\n    {\"id\": \"FR-3\", \"type\": \"functional\", \"description\": \"支持支出记录，如活动支出和物资采购。\", \"priority\": \"high\"},\n    {\"id\": \"FR-4\", \"type\": \"functional\", \"description\": \"支持实时余额统计，显示当前余额和收支明细。\", \"pr",
+        "ts": "2026-08-17T11:38:04.385789+00:00"
+      },
+      {
+        "task_id": "demo-1786966596-pm-0",
+        "status": "failed",
+        "duration_ms": 42160,
+        "error": "LLM output is not valid JSON: Unterminated string starting at: line 9 column 57 (char 574)\nRaw: {\n  \"project_name\": \"大学生班费管理系统\",\n  \"description\": \"一个用于管理大学生班级费用的系统，支持成员管理、收支记录和查询功能。\",\n  \"requirements\": [\n    {\"id\": \"FR-1\", \"type\": \"functional\", \"description\": \"班级成员管理：支持添加、删除和查询班级成员\", \"priority\": \"high\"},\n    {\"id\": \"FR-2\", \"type\": \"functional\", \"description\": \"收入记录：记录班费收取、活动退款等收入来源\", \"priority\": \"high\"},\n    {\"id\": \"FR-3\", \"type\": \"functional\", \"description\": \"支出记录：记录活动支出、物资采购等支出详情\", \"priority\": \"high\"},\n    {\"id\": \"FR-4\", \"type\": \"functional\", \"description\": \"余额统计：实时计算并显示余额，提供收支明细查看\", \"pr",
+        "ts": "2026-08-17T11:38:50.568057+00:00"
+      }
+    ]
+  }
+}

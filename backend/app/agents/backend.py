@@ -63,7 +63,7 @@ class BackendAgent(BaseAgent):
                 "required": ["files"],
             }
 
-            result = await self._llm.generate_json(messages, schema=schema, max_tokens=8000)
+            result = await self._llm.generate_json(messages, schema=schema, max_tokens=6000)
 
             # 写入文件到工作区
             ws = Path(ctx.workspace_path) / "src" / "backend"

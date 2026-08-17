@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>大学生班费管理系统</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f4f4f4;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        .balance-display {
+            font-size: 24px;
+            text-align: center;
+            margin: 20px 0;
+            padding: 10px;
+            background-color: #e8f5e9;
+            border-radius: 4px;
+        }
+        .form-section {
+            margin-bottom: 20px;
+        }
+        form {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        input, textarea, select {
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            padding: 10px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .error-message {
+            color: red;
+            text-align: center;
+        }
+        .transactions-list {
+            margin-top: 20px;
+        }
+        .transaction-item {
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+        }
+        .transaction-item:nth-child(odd) {
+            background-color: #f9f9f9;
+        }
+        @media (max-width: 600px) {
+            .container {
+                padding: 10px;
+            }
+            form {
+                gap: 5px;
+            }
+            .transaction-item {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>大学生班费管理系统</h1>
+        <div id="balance-display" class="balance-display">余额加载中...</div>
+        
+        <div class="form-section">
+            <h2>添加记录</h2>
+            <form id="transaction-form">
+                <label for="type">类型:</label>
+                <select id="type">
+                    <option value="income">收入</option>
+                    <option value="expense">支出</option>
+                </select>
+                <label for="amount">金额:</label>
+                <input type="number" id="amount" placeholder="输入金额" required>
+                <label for="description">描述:</label>
+                <textarea id="description" placeholder="输入描述" required></textarea>
+                <button type="submit">提交</button>
+            </form>
+            <div id="error-message" class="error-message"></div>
+        </div>
+
+        <div class="transactions-section">
+            <h2>交易记录</h2>
+            <div id="transactions-list" class="transactions-list">
+                <!-- 交易记录将通过JS加载 -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // JavaScript代码
+        const API_BASE = '/api'; // 假设API基础路径
+
+        // 获取余额
+        async function fetchBalance() {
+            try {
+                const response = await fetch(`${API_BASE}/balance`);
+                if (!response.ok) {
+                    throw new Error('获取余额失败');
+                }
+                const data = await response.json();
+                document.getElementById('balance-display').textContent = `当前余额: ¥${data.balance}`;
+            } catch (error) {
+                document.getElementById('balance-display').textContent = '获取余额失败';
+                showError(error.message);
+            }
+        }
+
+        // 获取交易记录
+        async function fetchTransactions() {
+            try {
+                const response = await fetch(`${API_BASE}/transactions`);
+                if (!response.ok) {
+                    throw new Error('获取交易记录失败');
+                }
+                const data = await response.json();
+                renderTransactions(data);
+            } catch (error) {
+                document.getElementById('transactions-list').innerHTML = `<div class="error-message">${error.message}</div>`;
+            }
+        }
+
+        // 渲染交易记录
+        function renderTransactions(transactions) {
+            const list = document.getElementById('transactions-list');
+            if (transactions.length === 0) {
+                list.innerHTML = '<p>暂无交易记录</p>';
+                return;
+            }
+            list.innerHTML = transactions.map(t => `
+                <div class="transaction-item">
+                    <span>${t.description} (${t.type === 'income' ? '收入' : '支出'})</span>
+                    <span>${t.type === 'income' ? '+' : '-'}¥${t.amount}</span>
+                    <span>${new Date(t.date).toLocaleString()}</span>
+                </div>
+            `).join('');
+        }
+
+        // 显示错误信息
+        function showError(message) {
+            document.getElementById('error-message').textContent = message;
+            setTimeout(() => {
+                document.getElementById('error-message').textContent = '';
+            }, 5000);
+        }
+
+        // 表单提交处理
+        document.getElementById('transaction-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const type = document.getElementById('type').value;
+            const amount = parseFloat(document.getElementById('amount').value);
+            const description = document.getElementById('description').value;
+
+            if (!amount || !description) {
+                showError('请填写所有字段');
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE}/${type}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ amount, description }),
+                });
+
+                if (!response.ok) {
+                    throw new Error('提交失败');
+                }
+
+                // 刷新余额和交易记录
+                await fetchBalance();
+                await fetchTransactions();
+
+                // 清空表单
+                document.getElementById('amount').value = '';
+                document.getElementById('description').value = '';
+            } catch (error) {
+                showError(error.message);
+            }
+        });
+
+        // 初始化加载
+        fetchBalance();
+        fetchTransactions();
+    </script>
+</body>
+</html>
