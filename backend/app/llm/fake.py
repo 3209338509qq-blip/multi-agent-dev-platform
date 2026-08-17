@@ -35,6 +35,8 @@ class FakeProvider(LLMProvider):
     async def generate_json(self, messages: list[ChatMessage], schema: dict[str, Any], *,
                             model: str | None = None, temperature: float | None = None,
                             max_tokens: int | None = None, timeout: float | None = None) -> dict[str, Any]:
+        self.call_count += 1
+        self.last_messages = list(messages)
         text = self._script.get("text", '{"result": "ok"}')
         try:
             result = json.loads(text)

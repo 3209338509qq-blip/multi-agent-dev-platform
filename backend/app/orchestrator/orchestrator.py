@@ -30,7 +30,7 @@ from app.agents import AgentContext, AgentResult, BaseAgent
 import app.database as _db_module  # 用模块引用确保 patch 可见
 from app.models import (
     AgentRole, AgentRun, Event, Project, ProjectStatus, RunStatus,
-    Task, TaskStatus,
+    Task, TaskDependency, TaskStatus,
 )
 from app.orchestrator.scheduler import Scheduler
 from app.orchestrator.state_machine import TaskStateMachine, IllegalTransitionError
@@ -295,7 +295,7 @@ class Orchestrator:
         if result.status == TaskStatus.SUCCESS:
             # 状态机迁移：RUNNING → SUCCESS
             TaskStateMachine.transition(self._scheduler.get_status(task_id), TaskStatus.SUCCESS, task_id)
-            new_ready = self._scheduler.mark_success(task_id)
+            self._scheduler.mark_success(task_id)
 
             async with _db_module.async_session_factory() as db:
                 await db.execute(
@@ -306,16 +306,24 @@ class Orchestrator:
                     )
                 )
                 await db.commit()
+
+            # PM 完成后动态创建后续任务
+            is_pm = (await self._get_task_role(task_id)) == AgentRole.PM
+            if is_pm and result.output_data:
+                await self._create_downstream_tasks(task_id, result.output_data)
+                await self._rebuild_scheduler()
+
             await self._event_bus.emit(BusEvent(
                 type=TASK_COMPLETED, project_id=self._project_id, task_id=task_id,
                 payload={"output_keys": list((result.output_data or {}).keys())},
             ))
 
             # 调度新就绪任务
-            for tid in new_ready:
-                self._register_pending(tid)
-                self._scheduler.mark_running(tid)
-                await self._task_queue.put(tid)
+            for tid in self._scheduler.ready_tasks():
+                if self._scheduler.get_status(tid) == TaskStatus.PENDING:
+                    self._register_pending(tid)
+                    self._scheduler.mark_running(tid)
+                    await self._task_queue.put(tid)
 
         elif result.status == TaskStatus.FAILED:
             # 检查重试
@@ -405,6 +413,74 @@ class Orchestrator:
             type=PROJECT_FAILED, project_id=self._project_id,
             payload={"reason": reason},
         ))
+
+    async def _get_task_role(self, task_id: str) -> AgentRole | None:
+        async with _db_module.async_session_factory() as db:
+            task = await db.get(Task, task_id)
+            if task:
+                return task.agent_role if isinstance(task.agent_role, AgentRole) else AgentRole(task.agent_role)
+        return None
+
+    async def _create_downstream_tasks(self, pm_task_id: str, pm_output: dict) -> None:
+        """PM 输出 → 创建后续任务（architect/backend/frontend/test/review/git）。"""
+        tasks_def = pm_output.get("tasks", [])
+        if not tasks_def:
+            return
+
+        # 建立 role→task_id 映射（PM 输出用 role 名称作依赖占位符）
+        role_to_task_id: dict[str, str] = {"pm": pm_task_id}
+
+        async with _db_module.async_session_factory() as db:
+            for i, tdef in enumerate(tasks_def):
+                role_str = tdef.get("role", "backend")
+                try:
+                    role = AgentRole(role_str)
+                except ValueError:
+                    logger.warning("Unknown role %s, defaulting to backend", role_str)
+                    role = AgentRole.BACKEND
+
+                task_id = f"{self._project_id}-{role_str}-{i}"
+                task = Task(
+                    id=task_id,
+                    project_id=self._project_id,
+                    agent_role=role,
+                    title=tdef.get("title", f"{role_str} task"),
+                    description=tdef.get("description", ""),
+                    status=TaskStatus.PENDING,
+                    input_data={**tdef, "project_name": pm_output.get("project_name", ""), "requirement": pm_output.get("requirement", "")},
+                    max_retries=self._settings.task_max_retries,
+                )
+                db.add(task)
+                role_to_task_id[role_str] = task_id
+
+            await db.flush()
+
+            # 创建依赖关系（将 role 占位符替换为真实 task_id）
+            for i, tdef in enumerate(tasks_def):
+                role_str = tdef.get("role", "backend")
+                task_id = role_to_task_id[role_str]
+                for dep_role in tdef.get("depends_on", []):
+                    dep_id = role_to_task_id.get(dep_role)
+                    if dep_id:
+                        db.add(TaskDependency(task_id=task_id, depends_on_id=dep_id))
+
+            await db.commit()
+
+        # 写入 PM 记忆
+        self._memory.set_project_memory(self._project_id, "pm_output", pm_output)
+        self._memory.set_project_memory(self._project_id, "project_name", pm_output.get("project_name", ""))
+        logger.info("Created %d downstream tasks from PM output", len(tasks_def))
+
+    async def _rebuild_scheduler(self) -> None:
+        """从数据库重新加载任务并重建调度器。"""
+        async with _db_module.async_session_factory() as db:
+            result = await db.execute(
+                select(Task).where(Task.project_id == self._project_id)
+                .options(selectinload(Task.dependencies))
+            )
+            tasks = list(result.scalars().all())
+        self._scheduler.build(tasks)
+        logger.info("Scheduler rebuilt with %d tasks", len(tasks))
 
     async def _wait_any_result(self) -> tuple[str, AgentResult]:
         """等待任意一个 pending 结果完成。"""
