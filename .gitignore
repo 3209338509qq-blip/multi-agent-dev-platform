@@ -1,0 +1,27 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# ---- Node ----
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# ---- 环境与密钥 ----
+.env
+.env.local
+*.local
+
+# ---- 运行时工作区（生成的子项目各自有独立 git 仓库）----
+workspace/projects/*
+!workspace/projects/.gitkeep
+backend/data/
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
