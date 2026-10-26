@@ -34,6 +34,7 @@ from app.models import (
 )
 from app.orchestrator.scheduler import Scheduler
 from app.orchestrator.state_machine import TaskStateMachine, IllegalTransitionError
+from app.orchestrator.task_plan import validate_task_plan
 from app.services.event_bus import EventBus, Event as BusEvent
 from app.services.event_types import *
 from app.services.memory import MemoryService
@@ -83,6 +84,7 @@ class Orchestrator:
         self._task_queue: asyncio.Queue[str] = asyncio.Queue()
         self._pending_results: dict[str, asyncio.Future[AgentResult]] = {}
         self._running = False
+        self._failure_reason: str | None = None
 
     async def run(self) -> ProjectStatus:
         """主循环：构建 DAG → 调度根任务 → Worker 处理 → 处理结果 → 循环直到终态。"""
@@ -100,10 +102,17 @@ class Orchestrator:
             tasks = list(result.scalars().all())
             if not tasks:
                 logger.warning("No tasks found for project %s", self._project_id)
-                return ProjectStatus.FAILED
+                await self._fail_project("No tasks found")
+                self._running = False
+                return await self._finalize()
 
         # 2. 构建调度器 DAG
-        self._scheduler.build(tasks)
+        try:
+            self._scheduler.build(tasks)
+        except ValueError as exc:
+            await self._fail_project(str(exc))
+            self._running = False
+            return await self._finalize()
         self._memory.set_project_memory(self._project_id, "status", "running")
 
         # 3. 广播项目启动事件
@@ -207,6 +216,39 @@ class Orchestrator:
             if not agent:
                 return AgentResult(status=TaskStatus.FAILED, error=f"no agent for role {role.value}")
 
+            project = await db.get(Project, self._project_id)
+            dependency_result = await db.execute(
+                select(Task).join(TaskDependency, Task.id == TaskDependency.depends_on_id)
+                .where(TaskDependency.task_id == task_id)
+                .order_by(Task.id)
+            )
+            parents = list(dependency_result.scalars().all())
+            upstream_outputs = {
+                parent.id: {"agent_role": parent.agent_role.value, "output_data": parent.output_data}
+                for parent in parents
+            }
+            # 保留各 Agent 现有的输入格式：架构师接收 PM 产物，开发者接收架构产物。
+            inherited = {}
+            input_role = {
+                AgentRole.ARCHITECT: AgentRole.PM,
+                AgentRole.BACKEND: AgentRole.ARCHITECT,
+                AgentRole.FRONTEND: AgentRole.ARCHITECT,
+            }.get(role)
+            for parent in parents:
+                if parent.agent_role == input_role:
+                    inherited.update(parent.output_data or {})
+            input_data = {
+                **(task.input_data or {}), **inherited,
+                "project_name": project.name,
+                "requirement": project.requirement,
+                "upstream_outputs": upstream_outputs,
+            }
+            if self._scheduler.get_status(task_id) == TaskStatus.RETRYING:
+                TaskStateMachine.transition(TaskStatus.RETRYING, TaskStatus.RUNNING, task_id)
+                self._scheduler.mark_running(task_id)
+            task.status = TaskStatus.RUNNING
+            task.started_at = datetime.now(timezone.utc)
+
             # 构建执行上下文
             ctx = AgentContext(
                 task_id=task.id,
@@ -214,11 +256,12 @@ class Orchestrator:
                 agent_role=role,
                 title=task.title,
                 description=task.description,
-                input_data=task.input_data,
+                input_data=input_data,
                 workspace_path=self._memory._workspace_root / "projects" / self._project_id,
                 project_memory=self._memory.get_project_memory(self._project_id),
                 agent_memory=self._memory.get_agent_memory(self._project_id, role.value),
                 task_memory=self._memory.get_task_memory(self._project_id, task.id),
+                config=project.config or {},
             )
 
             # 创建 AgentRun 记录
@@ -246,6 +289,9 @@ class Orchestrator:
             result = await asyncio.wait_for(
                 agent.run(ctx), timeout=self._settings.agent_timeout_seconds
             )
+            if (role == AgentRole.PM and result.status == TaskStatus.SUCCESS
+                    and result.output_data and "tasks" in result.output_data):
+                validate_task_plan(result.output_data["tasks"])
         except asyncio.TimeoutError:
             result = AgentResult(status=TaskStatus.FAILED, error="agent timeout")
         except Exception as exc:
@@ -302,6 +348,7 @@ class Orchestrator:
                     update(Task).where(Task.id == task_id).values(
                         status=TaskStatus.SUCCESS,
                         output_data=result.output_data,
+                        error=None,
                         finished_at=now,
                     )
                 )
@@ -378,7 +425,7 @@ class Orchestrator:
         """确定项目终态并更新 DB。"""
         if self._cancel_event.is_set():
             status = ProjectStatus.CANCELLED
-        elif self._scheduler.has_failures():
+        elif self._failure_reason or self._scheduler.has_failures():
             status = ProjectStatus.FAILED
         else:
             status = ProjectStatus.COMPLETED
@@ -401,8 +448,15 @@ class Orchestrator:
 
     async def _fail_project(self, reason: str) -> None:
         """直接失败整个项目（超时/预算耗尽）。"""
-        self._scheduler.cancel_all()
+        self._failure_reason = reason
+        cancelled = self._scheduler.cancel_all()
         async with _db_module.async_session_factory() as db:
+            if cancelled:
+                await db.execute(
+                    update(Task).where(Task.id.in_(cancelled)).values(
+                        status=TaskStatus.CANCELLED, finished_at=datetime.now(timezone.utc),
+                    )
+                )
             await db.execute(
                 update(Project).where(Project.id == self._project_id).values(
                     status=ProjectStatus.FAILED, updated_at=datetime.now(timezone.utc),
@@ -426,6 +480,7 @@ class Orchestrator:
         tasks_def = pm_output.get("tasks", [])
         if not tasks_def:
             return
+        validate_task_plan(tasks_def)
 
         # 建立 role→task_id 映射（PM 输出用 role 名称作依赖占位符）
         role_to_task_id: dict[str, str] = {"pm": pm_task_id}
@@ -433,11 +488,7 @@ class Orchestrator:
         async with _db_module.async_session_factory() as db:
             for i, tdef in enumerate(tasks_def):
                 role_str = tdef.get("role", "backend")
-                try:
-                    role = AgentRole(role_str)
-                except ValueError:
-                    logger.warning("Unknown role %s, defaulting to backend", role_str)
-                    role = AgentRole.BACKEND
+                role = AgentRole(role_str)
 
                 task_id = f"{self._project_id}-{role_str}-{i}"
                 task = Task(
@@ -459,7 +510,10 @@ class Orchestrator:
             for i, tdef in enumerate(tasks_def):
                 role_str = tdef.get("role", "backend")
                 task_id = role_to_task_id[role_str]
-                for dep_role in tdef.get("depends_on", []):
+                dep_roles = set(tdef.get("depends_on", []))
+                if role_str == "architect":
+                    dep_roles.add("pm")
+                for dep_role in dep_roles:
                     dep_id = role_to_task_id.get(dep_role)
                     if dep_id:
                         db.add(TaskDependency(task_id=task_id, depends_on_id=dep_id))

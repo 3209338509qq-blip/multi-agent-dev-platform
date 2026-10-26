@@ -1,17 +1,17 @@
 # Multi-Agent Dev Platform（多智能体软件研发系统）
 
-> 输入一个软件需求，系统自动完成：需求分析 → 任务拆解 → 架构设计 → 编码 → 自动测试 → Code Review → 自动修复 → Git 管理 → 交付可运行项目。
-> 一个从零自研、可现场演示的 Mini AI Software Engineering Platform。
+> 多智能体软件研发原型。目标流程：需求分析 → 任务拆解 → 架构设计 → 编码 → 测试 → Code Review → 自动修复 → Git 交付。
+> 当前已实现核心编排和代码生成；自动修复、完整 Git 工作流与隔离执行仍待补全，详见可靠性修补文档。
 
 ## ✨ 核心能力
 
 - **8 个专职 Agent**：PM（需求拆解）、Architect（架构设计）、Backend、Frontend、Test（真实执行测试）、Review（代码审查门控）、Debug（修复闭环）、Git（分支/提交/合并/回滚）
-- **自研轻量 Orchestrator**：Task DAG 调度、状态机、并行执行、失败重试、超时与 Token 预算
-- **真实闭环**：Test → Debug → Test 循环最多 3 轮；Review 不通过不 merge
+- **自研轻量 Orchestrator**：Task DAG 调度、状态机、并行执行、失败重试与超时；Token 预算执行尚待完善
+- **执行校验**：真实执行 pytest，结合退出码与 JUnit 报告判断成功；依赖图保证先测试、再审查、再提交。自动 Debug 修复循环尚待接入
 - **共享 Workspace + 三层 Memory**：Agent 通过文件系统与记忆协作，不依赖聊天上下文
-- **真实 Git 工作流**：每个 Agent 独立分支，commit 全程可追踪
-- **Web Dashboard**：项目列表、任务/Agent 状态、WebSocket 实时日志、Token 用量、测试与 Review 结果
-- **LLM Provider 抽象**：DeepSeek / MiMo / Qwen / OpenAI / Claude 一键切换（.env 配置）
+- **Git 产物提交**：当前支持初始化仓库与提交生成文件；独立分支、合并与回滚尚待实现
+- **Web Dashboard**：项目列表、任务状态、WebSocket 实时事件日志；Token 用量与详细测试/审查结果面板尚待补全
+- **LLM Provider 抽象**：当前注册 OpenAI 兼容接口，可通过 .env 配置地址与模型；Anthropic 原生接口尚未实现
 
 ## 🚀 快速开始（本地模式，无需 Docker）
 
@@ -34,10 +34,8 @@ docker compose up --build   # backend + frontend + postgres + redis
 ## 📚 文档
 
 - [docs/architecture.md](docs/architecture.md) — 系统总体架构（15 个设计主题）
-- [docs/agent-design.md](docs/agent-design.md) — Agent 设计（Phase 4 补全）
-- [docs/api.md](docs/api.md) — REST/WebSocket API 说明（Phase 10 补全）
-- [docs/security.md](docs/security.md) — 安全设计（Phase 8 补全）
-- [docs/demo.md](docs/demo.md) — 班费管理系统 Demo 说明（Phase 11 补全）
+- [docs/reliability-repairs.md](docs/reliability-repairs.md) — 可靠性修补、回归测试、按代码安排的学习路线与待补功能
+- 后端运行后打开 `/docs` 查看 FastAPI 自动生成的 API 文档
 
 ## 🏗 开发状态
 

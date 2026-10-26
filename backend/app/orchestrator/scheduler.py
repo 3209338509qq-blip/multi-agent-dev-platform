@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from graphlib import CycleError, TopologicalSorter
 from typing import Any
 
 from app.models import TaskStatus
@@ -36,6 +37,8 @@ class Scheduler:
         self._tasks.clear()
         dep_map: dict[str, set[str]] = {}
         for t in tasks:
+            if t.id in self._tasks:
+                raise ValueError(f"Duplicate task: {t.id}")
             dep_ids = {d.depends_on_id for d in t.dependencies}
             self._tasks[t.id] = SchedulerTask(
                 id=t.id,
@@ -45,6 +48,14 @@ class Scheduler:
                 depends_on=dep_ids,
             )
             dep_map[t.id] = dep_ids
+        for task_id, deps in dep_map.items():
+            missing = deps - self._tasks.keys()
+            if missing:
+                raise ValueError(f"Task {task_id}: missing dependencies {sorted(missing)}")
+        try:
+            tuple(TopologicalSorter(dep_map).static_order())
+        except CycleError as exc:
+            raise ValueError("Task dependencies contain a cycle") from exc
         for task_id, deps in dep_map.items():
             for dep_id in deps:
                 if dep_id in self._tasks:

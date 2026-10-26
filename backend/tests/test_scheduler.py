@@ -119,3 +119,14 @@ class TestScheduler:
         sched.mark_running("C")
         new = sched.mark_success("C")
         assert new == ["D"]  # D 现在就绪
+
+
+@pytest.mark.parametrize("tasks, message", [
+    ([_make_task("A", deps=["missing"])], "missing dependencies"),
+    ([_make_task("A", deps=["B"]), _make_task("B", deps=["A"])], "cycle"),
+    ([_make_task("A", deps=["A"])], "cycle"),
+    ([_make_task("A"), _make_task("A")], "Duplicate"),
+])
+def test_reject_invalid_graph(tasks, message):
+    with pytest.raises(ValueError, match=message):
+        Scheduler().build(tasks)
