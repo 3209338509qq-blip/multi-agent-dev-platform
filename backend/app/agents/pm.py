@@ -11,6 +11,7 @@ from typing import Any
 from app.agents import AgentContext, AgentResult, BaseAgent
 from app.llm import ChatMessage, LLMProvider
 from app.models import AgentRole, TaskStatus
+from app.orchestrator.task_plan import validate_task_plan
 
 logger = logging.getLogger("madp.agents.pm")
 
@@ -27,17 +28,18 @@ PM_SYSTEM_PROMPT = """你是一个资深产品经理（PM Agent）。你的任�
   "acceptance_criteria": ["验收标准1", "验收标准2"],
   "tasks": [
     {"role": "architect", "title": "任务标题", "description": "任务描述", "depends_on": []},
-    {"role": "backend", "title": "任务标题", "description": "任务描述", "depends_on": ["architect_task_id_placeholder"]},
-    {"role": "frontend", "title": "任务标题", "description": "任务描述", "depends_on": ["architect_task_id_placeholder"]},
-    {"role": "test", "title": "任务标题", "description": "任务描述", "depends_on": ["backend_task_id_placeholder", "frontend_task_id_placeholder"]},
-    {"role": "review", "title": "代码审查", "description": "审查全部代码质量", "depends_on": ["test_task_id_placeholder"]},
-    {"role": "git", "title": "Git 提交", "description": "合并分支到 main", "depends_on": ["review_task_id_placeholder"]}
+    {"role": "backend", "title": "任务标题", "description": "任务描述", "depends_on": ["architect"]},
+    {"role": "frontend", "title": "任务标题", "description": "任务描述", "depends_on": ["architect"]},
+    {"role": "test", "title": "任务标题", "description": "任务描述", "depends_on": ["backend", "frontend"]},
+    {"role": "review", "title": "代码审查", "description": "审查全部代码质量", "depends_on": ["test"]},
+    {"role": "git", "title": "Git 提交", "description": "提交已审查代码", "depends_on": ["review"]}
   ]
 }
 
 注意：
 - tasks 中 depends_on 使用 role 名称作为占位符（如 "architect"），系统会自动替换为真实 task id
 - task 角色必须是以下之一：architect, backend, frontend, test, review, debug, git
+- 必须包含 architect/backend/frontend/test/review/git，且每个角色只能有一个任务
 - 第一个 task 必须是 architect（架构设计）
 - backend 和 frontend 可以并行（都依赖 architect）
 - test 依赖 backend 和 frontend
@@ -74,21 +76,7 @@ class PMAgent(BaseAgent):
 
             result = await self._llm.generate_json(messages, schema=schema, max_tokens=8000)
 
-            # 验证 tasks 结构
-            tasks = result.get("tasks", [])
-            if not tasks:
-                return AgentResult(
-                    status=TaskStatus.FAILED,
-                    error="PM 未生成任何任务",
-                    prompt_tokens=self._llm.count_tokens(str(messages)),
-                )
-
-            # 验证第一个 task 是 architect
-            if tasks[0].get("role") != "architect":
-                return AgentResult(
-                    status=TaskStatus.FAILED,
-                    error=f"第一个任务必须是 architect，但得到 {tasks[0].get('role')}",
-                )
+            validate_task_plan(result.get("tasks"))
 
             return AgentResult(
                 status=TaskStatus.SUCCESS,

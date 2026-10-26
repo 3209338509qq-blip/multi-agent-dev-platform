@@ -199,3 +199,67 @@ async def test_pm_output_saved_to_memory(setup_env):
     pm_mem = memory.get_project_memory(project_id)
     assert "pm_output" in pm_mem
     assert pm_mem["project_name"] == "班费管理系统"
+
+
+@pytest.mark.parametrize("invalid", ["missing_role", "unknown_role", "duplicate", "bad_dependency", "cycle", "bypass_review"])
+async def test_pm_rejects_invalid_plan(invalid):
+    from copy import deepcopy
+    output = deepcopy(PM_OUTPUT)
+    tasks = output["tasks"]
+    if invalid == "missing_role":
+        tasks.pop()
+    elif invalid == "unknown_role":
+        tasks.append({"role": "unknown", "depends_on": []})
+    elif invalid == "duplicate":
+        tasks.append(deepcopy(tasks[1]))
+    elif invalid == "bad_dependency":
+        tasks[1]["depends_on"] = ["architect_task_id_placeholder"]
+    elif invalid == "cycle":
+        tasks[0]["depends_on"] = ["git"]
+    else:
+        tasks[-1]["depends_on"] = ["backend"]
+    agent = PMAgent(FakeProvider(script={"text": json.dumps(output)}))
+    result = await agent.run(AgentContext(
+        task_id="pm", project_id="p", agent_role=AgentRole.PM,
+        title="需求", description="测试",
+    ))
+    assert result.status == TaskStatus.FAILED
+    assert result.error
+
+
+async def test_real_agents_receive_upstream_json(setup_env):
+    """使用真实 Agent 类和确定性模型输出，验证实际 Prompt 与文件交接。"""
+    from app.agents.architect import ArchitectAgent
+    from app.agents.backend import BackendAgent
+    from app.agents.frontend import FrontendAgent
+    ctx = setup_env
+    project_id = await _create_project_with_pm(ctx["tmp_path"], ctx["ws_root"])
+    arch_output = {
+        "tech_stack": {"backend": "FastAPI"},
+        "api_design": [{"method": "GET", "path": "/api/members"}],
+        "database_schema": [{"table": "members"}],
+        "architecture_doc": "# Member service",
+    }
+    pm_llm = FakeProvider(script={"text": json.dumps(PM_OUTPUT)})
+    arch_llm = FakeProvider(script={"text": json.dumps(arch_output)})
+    backend_llm = FakeProvider(script={"text": json.dumps({"files": [
+        {"path": "app.py", "content": "# generated backend\n"},
+    ]})})
+    frontend_llm = FakeProvider(script={"text": json.dumps({"files": [
+        {"path": "index.html", "content": "<h1>Members</h1>"},
+    ]})})
+    registry = AgentRegistry()
+    for agent in (PMAgent(pm_llm), ArchitectAgent(arch_llm), BackendAgent(backend_llm), FrontendAgent(frontend_llm)):
+        registry.register(agent)
+    for role in (AgentRole.TEST, AgentRole.REVIEW, AgentRole.GIT):
+        registry.register(ScriptedAgent(role))
+    orch = Orchestrator(project_id, registry, EventBus(), MemoryService(ctx["ws_root"]), ctx["settings"])
+    assert await orch.run() == ProjectStatus.COMPLETED
+    assert "FR-1" in arch_llm.last_messages[-1].content
+    assert "/api/members" in backend_llm.last_messages[-1].content
+    assert "/api/members" in frontend_llm.last_messages[-1].content
+    assert "members" in frontend_llm.last_messages[-1].content
+    workspace = Path(ctx["ws_root"]) / "projects" / project_id
+    assert (workspace / "architecture.md").is_file()
+    assert (workspace / "src/backend/app.py").is_file()
+    assert (workspace / "src/frontend/index.html").is_file()

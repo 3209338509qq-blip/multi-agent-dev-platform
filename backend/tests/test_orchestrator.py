@@ -208,3 +208,64 @@ async def test_events_emitted(setup_db):
     assert "agent_completed" in types
     assert "task_completed" in types
     assert "project_completed" in types
+
+
+async def test_upstream_artifacts_reach_developers(setup_db):
+    """依赖顺序之外，实际的架构 JSON 也必须送到开发 Agent。"""
+    ctx = setup_db
+    project_id = await _create_project_with_tasks(ctx["tmp_path"], [
+        {"id": "arch", "role": "architect", "title": "架构"},
+        {"id": "backend", "role": "backend", "title": "后端", "deps": ["arch"]},
+        {"id": "frontend", "role": "frontend", "title": "前端", "deps": ["arch"]},
+    ], ctx["ws_root"])
+    architecture = {"api_design": [{"path": "/members", "method": "GET"}],
+                    "database_schema": [{"table": "members"}]}
+    registry = AgentRegistry()
+    registry.register(ScriptedAgent(AgentRole.ARCHITECT, {"output": architecture}))
+    received = {}
+
+    class CaptureAgent(ScriptedAgent):
+        async def run(self, agent_ctx):
+            received[self.role] = agent_ctx.input_data
+            # 前端看到的 running 状态必须来自数据库，而不只是内存调度器。
+            async with db_mod.async_session_factory() as db:
+                task = await db.get(Task, agent_ctx.task_id)
+                assert task.status == TaskStatus.RUNNING
+                assert task.started_at is not None
+            return await super().run(agent_ctx)
+
+    for role in (AgentRole.BACKEND, AgentRole.FRONTEND):
+        registry.register(CaptureAgent(role))
+    orch = Orchestrator(project_id, registry, ctx["event_bus"], ctx["memory"], ctx["settings"])
+    assert await orch.run() == ProjectStatus.COMPLETED
+    for role in (AgentRole.BACKEND, AgentRole.FRONTEND):
+        assert received[role]["api_design"] == architecture["api_design"]
+        assert received[role]["database_schema"] == architecture["database_schema"]
+        assert received[role]["requirement"] == "test requirement"
+        assert received[role]["upstream_outputs"]["arch"]["output_data"] == architecture
+
+
+async def test_invalid_persisted_graph_fails_promptly(setup_db):
+    ctx = setup_db
+    project_id = await _create_project_with_tasks(ctx["tmp_path"], [
+        {"id": "a", "role": "backend", "title": "A", "deps": ["b"]},
+        {"id": "b", "role": "frontend", "title": "B", "deps": ["a"]},
+    ], ctx["ws_root"])
+    orch = Orchestrator(project_id, AgentRegistry(), ctx["event_bus"], ctx["memory"], ctx["settings"])
+    assert await asyncio.wait_for(orch.run(), timeout=2) == ProjectStatus.FAILED
+    async with db_mod.async_session_factory() as db:
+        assert (await db.get(Project, project_id)).status == ProjectStatus.FAILED
+
+
+async def test_timeout_is_not_overwritten_as_completed(setup_db):
+    ctx = setup_db
+    ctx["settings"].agent_timeout_seconds = 0.02
+    project_id = await _create_project_with_tasks(ctx["tmp_path"], [
+        {"id": "slow", "role": "backend", "title": "Slow", "max_retries": 0},
+    ], ctx["ws_root"])
+    registry = AgentRegistry()
+    registry.register(ScriptedAgent(AgentRole.BACKEND, {"delay": 1}))
+    orch = Orchestrator(project_id, registry, ctx["event_bus"], ctx["memory"], ctx["settings"])
+    assert await orch.run() == ProjectStatus.FAILED
+    async with db_mod.async_session_factory() as db:
+        assert (await db.get(Project, project_id)).status == ProjectStatus.FAILED

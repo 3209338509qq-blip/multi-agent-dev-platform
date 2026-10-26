@@ -1,18 +1,49 @@
-"""Test Agent：生成并真实执行测试。
-
-读取生成的代码 → 补充/执行测试 → 输出测试报告。
-"""
+"""Test Agent：真实执行 pytest，以退出码和 JUnit 报告判断结果。"""
 from __future__ import annotations
-import json
+
+import asyncio
 import logging
-import subprocess
 from pathlib import Path
-from typing import Any
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
 
 from app.agents import AgentContext, AgentResult, BaseAgent
 from app.models import AgentRole, TaskStatus
 
 logger = logging.getLogger("madp.agents.test")
+
+SMOKE_TEST = '''"""基础检查不等于业务验收；验证依赖清单和 Python 语法。"""
+import ast
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+def test_requirements_exists():
+    assert (ROOT / "requirements.txt").is_file(), "requirements.txt 缺失"
+
+def test_source_syntax():
+    files = [p for p in ROOT.rglob("*.py")
+             if not {"tests", ".venv", "venv", "__pycache__"}.intersection(p.relative_to(ROOT).parts)]
+    assert files, "未找到 Python 源码"
+    for path in files:
+        ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+'''
+
+
+async def _run_command(args: list[str], cwd: Path, timeout: float = 120) -> tuple[int, str]:
+    """不阻塞事件循环；超时或取消时回收子进程。"""
+    process = await asyncio.create_subprocess_exec(
+        *args, cwd=str(cwd), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        if process.returncode is None:
+            process.kill()
+        await process.communicate()
+        raise
+    return process.returncode, stdout.decode("utf-8", errors="replace")
 
 
 class TestAgent(BaseAgent):
@@ -20,79 +51,61 @@ class TestAgent(BaseAgent):
 
     async def run(self, ctx: AgentContext) -> AgentResult:
         try:
-            backend_dir = Path(ctx.workspace_path) / "src" / "backend"
-            if not backend_dir.exists():
+            backend_dir = (Path(ctx.workspace_path) / "src" / "backend").resolve()
+            if not backend_dir.is_dir():
                 return AgentResult(status=TaskStatus.FAILED, error="后端代码目录不存在")
 
-            # 检查是否有 pytest 测试
-            test_files = list((backend_dir / "tests").glob("test_*.py")) if (backend_dir / "tests").exists() else []
-
-            if not test_files:
-                # 生成基础冒烟测试
-                tests_dir = backend_dir / "tests"
+            tests_dir = backend_dir / "tests"
+            test_files = list(tests_dir.rglob("test_*.py")) if tests_dir.exists() else []
+            smoke_only = not test_files
+            if smoke_only:
                 tests_dir.mkdir(parents=True, exist_ok=True)
-                smoke_test = '''"""自动生成的冒烟测试。"""
-import pytest
-from pathlib import Path
+                (tests_dir / "test_smoke.py").write_text(SMOKE_TEST, encoding="utf-8")
 
-def test_requirements_exists():
-    req = Path(__file__).parent.parent / "requirements.txt"
-    assert req.exists(), "requirements.txt 缺失"
-
-def test_app_module():
-    """验证 app 模块可导入。"""
-    import importlib.util
-    app_path = Path(__file__).parent.parent / "app.py"
-    if app_path.exists():
-        spec = importlib.util.spec_from_file_location("app", app_path)
-        mod = importlib.util.module_from_spec(spec)
-        # 只验证语法，不执行（避免依赖问题）
-        assert spec is not None
-'''
-                (tests_dir / "test_smoke.py").write_text(smoke_test, encoding="utf-8")
-                test_files = [tests_dir / "test_smoke.py"]
-
-            # 执行 pytest（使用沙箱）
             venv_python = backend_dir / ".venv" / "bin" / "python"
-            python_cmd = str(venv_python) if venv_python.exists() else "python3"
-
-            # 安装依赖
+            python_cmd = str(venv_python) if venv_python.exists() else sys.executable
             req_file = backend_dir / "requirements.txt"
             if req_file.exists():
-                install_result = subprocess.run(
-                    [python_cmd, "-m", "pip", "install", "-r", str(req_file), "-q"],
-                    capture_output=True, text=True, timeout=120,
-                    cwd=str(backend_dir),
+                code, output = await _run_command(
+                    [python_cmd, "-m", "pip", "install", "-r", str(req_file), "-q"], backend_dir,
                 )
-                if install_result.returncode != 0:
-                    logger.warning("pip install failed: %s", install_result.stderr[:500])
+                if code != 0:
+                    return AgentResult(
+                        status=TaskStatus.FAILED, error="依赖安装失败，测试未执行",
+                        output_data={"output": output[-4000:], "exit_code": code, "phase": "install"},
+                    )
 
-            # 运行 pytest
-            result = subprocess.run(
-                [python_cmd, "-m", "pytest", str(tests_dir), "-v", "--tb=short", "-q"],
-                capture_output=True, text=True, timeout=120,
-                cwd=str(backend_dir),
-            )
-
-            output = result.stdout + result.stderr
-            passed = output.count(" PASSED")
-            failed = output.count(" FAILED")
-            total = passed + failed
-
-            if failed > 0:
-                return AgentResult(
-                    status=TaskStatus.FAILED,
-                    error=f"测试失败：{failed}/{total}",
-                    output_data={"output": output[-2000:], "passed": passed, "failed": failed, "total": total},
+            with tempfile.TemporaryDirectory(prefix="madp-pytest-") as temp_dir:
+                report_path = Path(temp_dir) / "report.xml"
+                code, output = await _run_command(
+                    [python_cmd, "-m", "pytest", str(tests_dir), "-v", "--tb=short",
+                     f"--junitxml={report_path}"], backend_dir,
                 )
+                counts = {"passed": 0, "failed": 0, "skipped": 0, "total": 0}
+                report_valid = report_path.is_file()
+                if report_valid:
+                    try:
+                        report = ET.parse(report_path).getroot()
+                        for case in report.iter("testcase"):
+                            counts["total"] += 1
+                            if case.find("failure") is not None or case.find("error") is not None:
+                                counts["failed"] += 1
+                            elif case.find("skipped") is not None:
+                                counts["skipped"] += 1
+                            else:
+                                counts["passed"] += 1
+                    except ET.ParseError:
+                        report_valid = False
 
+            success = code == 0 and report_valid and counts["passed"] > 0 and counts["failed"] == 0
             return AgentResult(
-                status=TaskStatus.SUCCESS,
-                output_data={"output": output[-2000:], "passed": passed, "failed": failed, "total": total},
+                status=TaskStatus.SUCCESS if success else TaskStatus.FAILED,
+                error=None if success else f"测试未通过（退出码 {code}，通过 {counts['passed']}，失败 {counts['failed']}）",
+                output_data={**counts, "output": output[-4000:], "exit_code": code,
+                             "smoke_only": smoke_only, "report_valid": report_valid},
             )
-
-        except subprocess.TimeoutExpired:
-            return AgentResult(status=TaskStatus.FAILED, error="测试执行超时")
-        except Exception as e:
+        except asyncio.TimeoutError:
+            return AgentResult(status=TaskStatus.FAILED, error="测试或依赖安装超时")
+        except Exception as exc:
             logger.exception("Test Agent failed")
-            return AgentResult(status=TaskStatus.FAILED, error=str(e))
+            return AgentResult(status=TaskStatus.FAILED, error=str(exc))
