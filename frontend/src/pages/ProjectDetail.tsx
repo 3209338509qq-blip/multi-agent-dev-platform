@@ -1,3 +1,4 @@
+import ProjectArtifacts from "./ProjectArtifacts";
 import { useEffect, useState, useCallback, useRef } from "react";
 import { getProject, runProject, getEvents, connectWS, type Project, type Task, type Event } from "../api";
 
@@ -85,7 +86,9 @@ export default function ProjectDetail({ projectId, onBack }: { projectId: string
         <p className="text-sm text-slate-400">{project.requirement}</p>
       </div>
 
-      <div className="grid lg:grid-cols-5 gap-4">
+      <ProjectArtifacts key={projectId} projectId={projectId} />
+
+      <div className="grid lg:grid-cols-5 gap-4 mt-4">
         {/* 任务面板 (3/5) */}
         <section className="lg:col-span-3 rounded-xl border border-slate-800 bg-slate-900 p-4">
           <h2 className="font-semibold mb-3 text-sm flex items-center gap-2">
