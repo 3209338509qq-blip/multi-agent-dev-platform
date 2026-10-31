@@ -154,6 +154,39 @@ async def list_events(project_id: str, after_seq: int = 0, db: AsyncSession = De
     return list(result.scalars().all())
 
 
+# ---------- 成果（只读）----------
+
+@router.get("/{project_id}/artifacts")
+async def list_artifacts(project_id: str, db: AsyncSession = Depends(get_db)):
+    return await _artifacts(project_id, db, "list")
+
+
+@router.get("/{project_id}/artifacts/file")
+async def preview_artifact(project_id: str, path: str, db: AsyncSession = Depends(get_db)):
+    return await _artifacts(project_id, db, "preview", path)
+
+
+@router.get("/{project_id}/artifacts/download")
+async def download_artifacts(project_id: str, db: AsyncSession = Depends(get_db)):
+    from fastapi.responses import Response
+    data = await _artifacts(project_id, db, "zip")
+    return Response(data, media_type="application/zip", headers={
+        "Content-Disposition": f'attachment; filename="project-{project_id}.zip"',
+        "Cache-Control": "no-store",
+    })
+
+
+async def _artifacts(project_id, db, mode, path=""):
+    from starlette.concurrency import run_in_threadpool
+    from app.services.artifacts import artifacts
+    project = await db.get(Project, project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    return await run_in_threadpool(
+        artifacts, _get_settings().workspace_root, project.id, project.workspace_path, mode, path
+    )
+
+
 # ---------- 运行 / 取消 ----------
 
 @router.post("/{project_id}/run")

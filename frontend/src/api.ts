@@ -52,3 +52,31 @@ export function connectWS(projectId: string, onEvent: (e: Event) => void): () =>
   ws.onerror = () => {};
   return () => ws.close();
 }
+
+export interface Artifact { path: string; size: number }
+export interface ArtifactPreview extends Artifact { content: string }
+
+async function artifactRequest<T>(id: string, suffix = ""): Promise<T> {
+  const r = await fetch(`${BASE}/projects/${encodeURIComponent(id)}/artifacts${suffix}`);
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.detail || `请求失败 (${r.status})`);
+  }
+  return r.json();
+}
+export const listArtifacts = (id: string) => artifactRequest<{ files: Artifact[] }>(id);
+export const previewArtifact = (id: string, path: string) =>
+  artifactRequest<ArtifactPreview>(id, `/file?path=${encodeURIComponent(path)}`);
+export async function downloadArtifacts(id: string): Promise<void> {
+  const r = await fetch(`${BASE}/projects/${encodeURIComponent(id)}/artifacts/download`);
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.detail || `下载失败 (${r.status})`);
+  }
+  const url = URL.createObjectURL(await r.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `project-${id}.zip`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
