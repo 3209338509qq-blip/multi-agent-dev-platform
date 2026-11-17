@@ -1,4 +1,5 @@
 """FastAPI 入口：挂载 API 路由 + 生命周期管理。"""
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -9,7 +10,6 @@ from app import __version__
 from app.config import get_settings
 from app.database import init_db
 from app.services.event_bus import event_bus
-from app.services.memory import MemoryService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("madp")
@@ -33,14 +33,24 @@ async def lifespan(app: FastAPI):
                 run_id=event.run_id,
                 type=event.type,
                 payload=event.payload,
+                ts=event.ts,
             )
             db.add(db_event)
+            await db.flush()
+            db_event.seq = db_event.id
             await db.commit()
+            return db_event.id
 
+    app.state.project_run_lock = asyncio.Lock()
+    app.state.project_runs = {}
     event_bus.set_persist_fn(persist_event)
     logger.info("Platform started (v%s, sandbox=%s)", __version__, settings.sandbox_backend)
-    yield
-    logger.info("Platform shutting down")
+    try:
+        yield
+    finally:
+        await shutdown_project_runs(app)
+        event_bus.set_persist_fn(None)
+        logger.info("Platform shutting down")
 
 
 app = FastAPI(
@@ -59,7 +69,7 @@ app.add_middleware(
 )
 
 # 挂载 API 路由
-from app.api.projects import router as projects_router
+from app.api.projects import router as projects_router, shutdown_project_runs
 from app.api.websocket import router as ws_router
 app.include_router(projects_router)
 app.include_router(ws_router)

@@ -86,6 +86,7 @@ class ProjectDetailOut(ProjectOut):
 
 class EventOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+    seq: int
     type: str
     task_id: str | None = None
     payload: dict[str, Any] | None = None

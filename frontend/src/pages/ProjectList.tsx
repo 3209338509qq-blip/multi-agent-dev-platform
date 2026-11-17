@@ -18,18 +18,30 @@ export default function ProjectList({ onOpen }: { onOpen: (id: string) => void }
   const [name, setName] = useState("");
   const [req, setReq] = useState("");
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
-  const load = useCallback(async () => { setProjects(await listProjects()); }, []);
+  const load = useCallback(async () => {
+    try {
+      setProjects(await listProjects());
+    } catch (err) {
+      setError(String(err));
+    }
+  }, []);
   useEffect(() => { load(); }, [load]);
 
   const handleCreate = async () => {
     if (!name.trim() || !req.trim()) return;
     setLoading(true);
+    setError("");
     try {
       const p = await createProject({ name, requirement: req });
       setName(""); setReq(""); setShowCreate(false);
       onOpen(p.id);
-    } finally { setLoading(false); }
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -38,6 +50,8 @@ export default function ProjectList({ onOpen }: { onOpen: (id: string) => void }
         <h1 className="text-xl font-bold">项目列表</h1>
         <button onClick={() => setShowCreate(true)} className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-sm font-medium transition">+ 新建项目</button>
       </div>
+
+      {error && <p role="alert" className="mb-4 text-sm text-rose-300">{error}</p>}
 
       {showCreate && (
         <div className="mb-6 rounded-xl border border-slate-700 bg-slate-900 p-4">
