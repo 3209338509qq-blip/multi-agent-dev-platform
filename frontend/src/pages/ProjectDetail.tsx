@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import { getProject, runProject, getEvents, connectWS, type Project, type Task, type Event } from "../api";
+import { getProject, runProject, cancelProject, connectWS, type Project, type Task, type Event } from "../api";
 
 const TASK_STATUS: Record<string, { label: string; color: string }> = {
   pending: { label: "等待", color: "bg-slate-600 text-slate-200" },
@@ -19,47 +19,63 @@ const ROLE_EMOJI: Record<string, string> = {
 export default function ProjectDetail({ projectId, onBack }: { projectId: string; onBack: () => void }) {
   const [project, setProject] = useState<(Project & { tasks: Task[] }) | null>(null);
   const [events, setEvents] = useState<Event[]>([]);
-  const [running, setRunning] = useState(false);
+  const [pendingAction, setPendingAction] = useState<"run" | "cancel" | null>(null);
+  const [error, setError] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
+  const requestId = useRef(0);
 
   const load = useCallback(async () => {
-    const p = await getProject(projectId);
-    setProject(p);
-    const evts = await getEvents(projectId);
-    setEvents(evts);
+    const id = ++requestId.current;
+    try {
+      const updated = await getProject(projectId);
+      if (id === requestId.current) setProject(updated);
+    } catch (err) {
+      if (id === requestId.current) setError(String(err));
+    }
   }, [projectId]);
 
-  useEffect(() => { load(); }, [load]);
-
   useEffect(() => {
-    const close = connectWS(projectId, (e) => {
-      setEvents(prev => [...prev, e]);
-      // 自动刷新任务状态
-      if (e.type.startsWith("task_") || e.type.startsWith("project_")) {
-        setTimeout(() => load(), 500);
+    let refresh: number | undefined;
+    void load();
+    const close = connectWS(projectId, (event) => {
+      setEvents(previous => [...previous, event]);
+      if (event.type.startsWith("task_") || event.type.startsWith("project_")) {
+        window.clearTimeout(refresh);
+        refresh = window.setTimeout(load, 100);
       }
-      setTimeout(() => logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" }), 50);
     });
-    return close;
+    return () => {
+      close();
+      window.clearTimeout(refresh);
+      requestId.current++;
+    };
   }, [projectId, load]);
 
-  const handleRun = async () => {
-    setRunning(true);
+  useEffect(() => {
+    logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
+  }, [events]);
+
+  const handleAction = async (action: "run" | "cancel") => {
+    setPendingAction(action);
+    setError("");
     try {
-      await runProject(projectId);
-      // 开始轮询状态
-      const poll = setInterval(async () => {
-        const p = await getProject(projectId);
-        setProject(p);
-        if (["completed", "failed", "cancelled"].includes(p.status)) {
-          clearInterval(poll);
-          setRunning(false);
-        }
-      }, 2000);
-    } catch { setRunning(false); }
+      await (action === "run" ? runProject(projectId) : cancelProject(projectId));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      await load();
+      setPendingAction(null);
+    }
   };
 
-  if (!project) return <div className="text-slate-500 animate-pulse">加载中...</div>;
+  if (!project) {
+    return error ? (
+      <div role="alert" className="text-rose-300">
+        <button onClick={onBack} className="mr-4 text-slate-400">返回列表</button>
+        {error}
+      </div>
+    ) : <div className="text-slate-500 animate-pulse">加载中...</div>;
+  }
 
   const tasks = project.tasks || [];
   const doneCount = tasks.filter(t => t.status === "success").length;
@@ -73,15 +89,21 @@ export default function ProjectDetail({ projectId, onBack }: { projectId: string
         <div className="flex items-center gap-3 mb-2">
           <h1 className="text-xl font-bold">{project.name}</h1>
           <span className="text-xs px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300">{project.status}</span>
-          {project.status === "planning" && (
-            <button onClick={handleRun} disabled={running} className="ml-auto px-5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-medium disabled:opacity-50 transition">
-              {running ? "Agent 执行中..." : "\u25B6 运行 Agent"}
+          {["planning", "failed", "cancelled"].includes(project.status) && (
+            <button onClick={() => handleAction("run")} disabled={pendingAction !== null} className="ml-auto px-5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-medium disabled:opacity-50 transition">
+              {pendingAction === "run" ? "启动中..." : project.status === "planning" ? "运行 Agent" : "重新运行"}
             </button>
           )}
-          {["completed", "failed"].includes(project.status) && (
+          {["architecting", "coding", "testing", "reviewing"].includes(project.status) && (
+            <button onClick={() => handleAction("cancel")} disabled={pendingAction !== null} className="ml-auto px-5 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm font-medium disabled:opacity-50 transition">
+              {pendingAction === "cancel" ? "取消中..." : "取消运行"}
+            </button>
+          )}
+          {project.status === "completed" && (
             <span className="ml-auto text-sm text-slate-400">{doneCount}/{tasks.length} tasks completed</span>
           )}
         </div>
+        {error && <p role="alert" className="mb-2 text-sm text-rose-300">{error}</p>}
         <p className="text-sm text-slate-400">{project.requirement}</p>
       </div>
 
@@ -123,8 +145,8 @@ export default function ProjectDetail({ projectId, onBack }: { projectId: string
         <section className="lg:col-span-2 rounded-xl border border-slate-800 bg-slate-900 p-4">
           <h2 className="font-semibold mb-3 text-sm">实时事件 <span className="text-xs text-slate-500">({events.length})</span></h2>
           <div ref={logRef} className="h-96 overflow-y-auto space-y-0.5 font-mono text-xs">
-            {events.map((e, i) => (
-              <div key={i} className="flex gap-2 py-0.5 hover:bg-slate-800/50 px-1 rounded">
+            {events.map(e => (
+              <div key={e.seq} className="flex gap-2 py-0.5 hover:bg-slate-800/50 px-1 rounded">
                 <span className="text-slate-600 shrink-0 w-14">{new Date(e.ts).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>
                 <span className={(e.type.includes("fail") ? "text-red-400" : e.type.includes("complete") ? "text-emerald-400" : e.type.includes("start") ? "text-blue-400" : "text-slate-300") + " truncate"}>{e.type}</span>
               </div>

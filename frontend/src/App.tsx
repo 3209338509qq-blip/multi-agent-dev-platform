@@ -33,7 +33,7 @@ export default function App() {
       </header>
       <main className="mx-auto max-w-6xl px-4 py-6">
         {page.type === "home" && <ProjectList onOpen={(id) => navigate({ type: "project", id })} />}
-        {page.type === "project" && <ProjectDetail projectId={page.id} onBack={() => navigate({ type: "home" })} />}
+        {page.type === "project" && <ProjectDetail key={page.id} projectId={page.id} onBack={() => navigate({ type: "home" })} />}
       </main>
     </div>
   );

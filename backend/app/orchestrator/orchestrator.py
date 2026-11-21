@@ -29,11 +29,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents import AgentContext, AgentResult, BaseAgent
 import app.database as _db_module  # 用模块引用确保 patch 可见
 from app.models import (
-    AgentRole, AgentRun, Event, Project, ProjectStatus, RunStatus,
-    Task, TaskDependency, TaskStatus,
+    AgentRole, AgentRun, Project, ProjectStatus, RunStatus,
+    Task, TaskDependency, TaskStatus, uuid_str,
 )
 from app.orchestrator.scheduler import Scheduler
-from app.orchestrator.state_machine import TaskStateMachine, IllegalTransitionError
+from app.orchestrator.state_machine import TaskStateMachine
 from app.services.event_bus import EventBus, Event as BusEvent
 from app.services.event_types import *
 from app.services.memory import MemoryService
@@ -82,107 +82,86 @@ class Orchestrator:
         self._cancel_event = asyncio.Event()
         self._task_queue: asyncio.Queue[str] = asyncio.Queue()
         self._pending_results: dict[str, asyncio.Future[AgentResult]] = {}
-        self._running = False
 
     async def run(self) -> ProjectStatus:
-        """主循环：构建 DAG → 调度根任务 → Worker 处理 → 处理结果 → 循环直到终态。"""
-        self._running = True
-
-        # 1. 从数据库加载项目与任务
-        async with _db_module.async_session_factory() as db:
-            project = await db.get(Project, self._project_id)
-            if not project:
-                raise ValueError(f"Project {self._project_id} not found")
-            result = await db.execute(
-                select(Task).where(Task.project_id == self._project_id)
-                .options(selectinload(Task.dependencies))
-            )
-            tasks = list(result.scalars().all())
-            if not tasks:
-                logger.warning("No tasks found for project %s", self._project_id)
-                return ProjectStatus.FAILED
-
-        # 2. 构建调度器 DAG
-        self._scheduler.build(tasks)
-        self._memory.set_project_memory(self._project_id, "status", "running")
-
-        # 3. 广播项目启动事件
-        await self._event_bus.emit(BusEvent(
-            type=PROJECT_STARTED,
-            project_id=self._project_id,
-            payload={"task_count": len(tasks)},
-        ))
-
-        # 4. 启动 Worker Pool
-        workers = [
-            asyncio.create_task(self._worker(i), name=f"worker-{i}")
-            for i in range(self._settings.max_parallel_tasks)
-        ]
-
-        # 5. 调度根任务（无依赖）
-        initial_ready = self._scheduler.ready_tasks()
-        for tid in initial_ready:
-            self._register_pending(tid)
-            self._scheduler.mark_running(tid)
-            await self._task_queue.put(tid)
-
-        # 6. 主循环：等待结果直到终态或取消
+        """运行任务图，并在写入项目终态前等待 Worker 退出。"""
+        workers = []
+        cancel_waiter = asyncio.create_task(self._cancel_event.wait())
+        failure = None
         try:
+            tasks = await self._load_tasks()
+            if not tasks:
+                raise RuntimeError("project has no tasks")
+            if self._settings.max_parallel_tasks < 1:
+                raise RuntimeError("max_parallel_tasks must be positive")
+
+            # 旧版本可能在保存 PM 成功后、创建下游任务前退出。
+            if len(tasks) == 1:
+                pm = tasks[0]
+                if pm.agent_role == AgentRole.PM and pm.status == TaskStatus.SUCCESS:
+                    if (pm.output_data or {}).get("tasks"):
+                        await self._create_downstream_tasks(pm.id, pm.output_data)
+                        tasks = await self._load_tasks()
+
+            self._scheduler.build(tasks)
+            if not self._cancel_event.is_set():
+                self._memory.set_project_memory(self._project_id, "status", "running")
+                await self._event_bus.emit(BusEvent(
+                    type=PROJECT_STARTED, project_id=self._project_id,
+                    payload={"task_count": len(tasks)},
+                ))
+                workers = [
+                    asyncio.create_task(self._worker(i), name=f"worker-{i}")
+                    for i in range(self._settings.max_parallel_tasks)
+                ]
+                self._enqueue_ready_tasks()
+
             while not self._scheduler.is_terminal() and not self._cancel_event.is_set():
-                try:
-                    task_id, result = await asyncio.wait_for(
-                        self._wait_any_result(), timeout=self._settings.agent_timeout_seconds
-                    )
-                except asyncio.TimeoutError:
-                    logger.error("Project %s timed out waiting for results", self._project_id)
-                    await self._fail_project("orchestrator timeout")
-                    break
-                except asyncio.CancelledError:
+                if not self._pending_results:
+                    raise RuntimeError("no runnable tasks remain")
+                done, _ = await asyncio.wait(
+                    [cancel_waiter, *self._pending_results.values()],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if cancel_waiter in done:
                     break
 
-                await self._process_result(task_id, result)
+                for task_id, future in list(self._pending_results.items()):
+                    if future in done and not self._cancel_event.is_set():
+                        del self._pending_results[task_id]
+                        await self._process_result(task_id, future.result())
+        except asyncio.CancelledError:
+            self._cancel_event.set()
+        except Exception as exc:
+            logger.exception("Project %s failed", self._project_id)
+            failure = str(exc)
         finally:
-            # 关闭 workers
-            for _ in workers:
-                await self._task_queue.put(None)  # sentinel
-            await asyncio.gather(*workers, return_exceptions=True)
-            self._running = False
+            cancel_waiter.cancel()
+            for worker in workers:
+                worker.cancel()
+            await asyncio.gather(cancel_waiter, *workers, return_exceptions=True)
 
-        # 7. 确定项目终态
-        final_status = await self._finalize()
-        return final_status
+        return await self._finalize(failure)
 
     async def cancel(self) -> None:
-        """外部取消：级联取消所有未终态任务。"""
+        """通知调度循环停止，并由 run() 收回 Worker 和持久化终态。"""
         self._cancel_event.set()
-        cancelled = self._scheduler.cancel_all()
-        async with _db_module.async_session_factory() as db:
-            for tid in cancelled:
-                await db.execute(
-                    update(Task).where(Task.id == tid).values(
-                        status=TaskStatus.CANCELLED, finished_at=datetime.now(timezone.utc)
-                    )
-                )
-                await self._event_bus.emit(BusEvent(
-                    type=TASK_CANCELLED, project_id=self._project_id, task_id=tid,
-                ))
-            await db.execute(
-                update(Project).where(Project.id == self._project_id).values(
-                    status=ProjectStatus.CANCELLED, updated_at=datetime.now(timezone.utc)
-                )
-            )
-            await db.commit()
-        await self._event_bus.emit(BusEvent(
-            type=PROJECT_CANCELLED, project_id=self._project_id,
-        ))
+
+    def _enqueue_ready_tasks(self) -> None:
+        for task_id in self._scheduler.ready_tasks():
+            self._enqueue_task(task_id)
+
+    def _enqueue_task(self, task_id: str) -> None:
+        self._pending_results[task_id] = asyncio.get_running_loop().create_future()
+        self._scheduler.mark_running(task_id)
+        self._task_queue.put_nowait(task_id)
 
     async def _worker(self, worker_id: int) -> None:
         """Worker 协程：从队列拉取任务 id → 执行 Agent → 回报结果。"""
         while True:
             task_id = await self._task_queue.get()
-            if task_id is None:  # sentinel
-                break
-
+            if self._cancel_event.is_set():
+                return
             try:
                 result = await self._execute_task(task_id)
             except Exception as exc:
@@ -221,6 +200,10 @@ class Orchestrator:
                 task_memory=self._memory.get_task_memory(self._project_id, task.id),
             )
 
+            task.status = TaskStatus.RUNNING
+            task.started_at = datetime.now(timezone.utc)
+            task.finished_at = None
+
             # 创建 AgentRun 记录
             run_record = AgentRun(
                 task_id=task.id,
@@ -234,19 +217,24 @@ class Orchestrator:
             run_id = run_record.id
             await db.commit()
 
-        # 广播 Agent 启动
+        await self._event_bus.emit(BusEvent(
+            type=TASK_STARTED, project_id=self._project_id, task_id=task_id,
+        ))
         await self._event_bus.emit(BusEvent(
             type=AGENT_STARTED, project_id=self._project_id,
             task_id=task_id, run_id=run_id,
             payload={"role": role.value},
         ))
 
-        # 执行 Agent（带超时）
+        run_status = RunStatus.FAILED
         try:
             result = await asyncio.wait_for(
                 agent.run(ctx), timeout=self._settings.agent_timeout_seconds
             )
+            if result.status == TaskStatus.SUCCESS:
+                run_status = RunStatus.SUCCESS
         except asyncio.TimeoutError:
+            run_status = RunStatus.TIMEOUT
             result = AgentResult(status=TaskStatus.FAILED, error="agent timeout")
         except Exception as exc:
             logger.exception("Agent %s crashed on task %s", role.value, task_id)
@@ -259,7 +247,7 @@ class Orchestrator:
         async with _db_module.async_session_factory() as db:
             await db.execute(
                 update(AgentRun).where(AgentRun.id == run_id).values(
-                    status=RunStatus.SUCCESS if result.status == TaskStatus.SUCCESS else RunStatus.FAILED,
+                    status=run_status,
                     prompt_tokens=result.prompt_tokens,
                     completion_tokens=result.completion_tokens,
                     duration_ms=duration_ms,
@@ -289,219 +277,184 @@ class Orchestrator:
         return result
 
     async def _process_result(self, task_id: str, result: AgentResult) -> None:
-        """处理任务结果：更新 DB + 调度器状态 + 广播事件 + 调度下游。"""
+        """提交任务结果后再广播，避免在 SQLite 写事务内等待另一条写连接。"""
         now = datetime.now(timezone.utc)
-
+        previous = self._scheduler.get_status(task_id)
         if result.status == TaskStatus.SUCCESS:
-            # 状态机迁移：RUNNING → SUCCESS
-            TaskStateMachine.transition(self._scheduler.get_status(task_id), TaskStatus.SUCCESS, task_id)
-            self._scheduler.mark_success(task_id)
-
+            TaskStateMachine.transition(previous, TaskStatus.SUCCESS, task_id)
             async with _db_module.async_session_factory() as db:
-                await db.execute(
-                    update(Task).where(Task.id == task_id).values(
-                        status=TaskStatus.SUCCESS,
-                        output_data=result.output_data,
-                        finished_at=now,
-                    )
-                )
+                task = await db.get(Task, task_id)
+                task.status = TaskStatus.SUCCESS
+                task.output_data = result.output_data
+                task.error = None
+                task.finished_at = now
+                is_pm = task.agent_role == AgentRole.PM and bool(result.output_data)
+                if is_pm:
+                    await self._insert_downstream_tasks(db, task_id, result.output_data)
                 await db.commit()
 
-            # PM 完成后动态创建后续任务
-            is_pm = (await self._get_task_role(task_id)) == AgentRole.PM
-            if is_pm and result.output_data:
-                await self._create_downstream_tasks(task_id, result.output_data)
-                await self._rebuild_scheduler()
+            self._scheduler.mark_success(task_id)
+            if is_pm:
+                self._save_pm_output(result.output_data)
+                self._scheduler.build(await self._load_tasks())
+                for pending_id in self._pending_results:
+                    self._scheduler.mark_running(pending_id)
 
             await self._event_bus.emit(BusEvent(
                 type=TASK_COMPLETED, project_id=self._project_id, task_id=task_id,
                 payload={"output_keys": list((result.output_data or {}).keys())},
             ))
+            if not self._cancel_event.is_set():
+                self._enqueue_ready_tasks()
+            return
 
-            # 调度新就绪任务
-            for tid in self._scheduler.ready_tasks():
-                if self._scheduler.get_status(tid) == TaskStatus.PENDING:
-                    self._register_pending(tid)
-                    self._scheduler.mark_running(tid)
-                    await self._task_queue.put(tid)
-
-        elif result.status == TaskStatus.FAILED:
-            # 检查重试
-            async with _db_module.async_session_factory() as db:
-                task = await db.get(Task, task_id)
-                if task and task.retry_count < task.max_retries:
-                    # 先记录失败，再重试：RUNNING → FAILED → RETRYING
-                    TaskStateMachine.transition(self._scheduler.get_status(task_id), TaskStatus.FAILED, task_id)
-                    TaskStateMachine.transition(TaskStatus.FAILED, TaskStatus.RETRYING, task_id)
-                    self._scheduler.mark_retrying(task_id)
+        TaskStateMachine.transition(previous, TaskStatus.FAILED, task_id)
+        async with _db_module.async_session_factory() as db:
+            task = await db.get(Task, task_id)
+            task.error = result.error
+            retry = task.retry_count < task.max_retries
+            if retry:
+                TaskStateMachine.transition(TaskStatus.FAILED, TaskStatus.RETRYING, task_id)
+                self._scheduler.mark_retrying(task_id)
+                task.status = TaskStatus.RETRYING
+                task.retry_count += 1
+            else:
+                blocked = self._scheduler.mark_failed(task_id)
+                task.status = TaskStatus.FAILED
+                task.finished_at = now
+                if blocked:
                     await db.execute(
-                        update(Task).where(Task.id == task_id).values(
-                            status=TaskStatus.RETRYING,
-                            retry_count=task.retry_count + 1,
-                            error=result.error,
+                        update(Task).where(Task.id.in_(blocked)).values(
+                            status=TaskStatus.BLOCKED, finished_at=now,
                         )
                     )
-                    await db.commit()
-                    await self._event_bus.emit(BusEvent(
-                        type=TASK_RETRYING, project_id=self._project_id, task_id=task_id,
-                        payload={"retry_count": task.retry_count + 1, "error": result.error},
-                    ))
-                    # 指数退避后重新入队
-                    delay = min(2 ** task.retry_count, 30)
-                    await asyncio.sleep(delay)
-                    self._register_pending(task_id)
-                    await self._task_queue.put(task_id)
-                else:
-                    # 最终失败：BLOCKED + 级联下游
-                    TaskStateMachine.transition(self._scheduler.get_status(task_id), TaskStatus.FAILED, task_id)
-                    blocked = self._scheduler.mark_failed(task_id)
-                    await db.execute(
-                        update(Task).where(Task.id == task_id).values(
-                            status=TaskStatus.FAILED, error=result.error, finished_at=now,
-                        )
-                    )
-                    for bid in blocked:
-                        await db.execute(
-                            update(Task).where(Task.id == bid).values(status=TaskStatus.BLOCKED)
-                        )
-                        await self._event_bus.emit(BusEvent(
-                            type=TASK_BLOCKED, project_id=self._project_id, task_id=bid,
-                            payload={"blocked_by": task_id},
-                        ))
-                    await db.commit()
-                    await self._event_bus.emit(BusEvent(
-                        type=TASK_FAILED, project_id=self._project_id, task_id=task_id,
-                        payload={"error": result.error},
-                    ))
+            await db.commit()
 
-    async def _finalize(self) -> ProjectStatus:
-        """确定项目终态并更新 DB。"""
-        if self._cancel_event.is_set():
+        if retry:
+            await self._event_bus.emit(BusEvent(
+                type=TASK_RETRYING, project_id=self._project_id, task_id=task_id,
+                payload={"retry_count": task.retry_count, "error": result.error},
+            ))
+            delay = min(2 ** (task.retry_count - 1), 30)
+            try:
+                await asyncio.wait_for(self._cancel_event.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                self._enqueue_task(task_id)
+            return
+
+        for blocked_id in blocked:
+            await self._event_bus.emit(BusEvent(
+                type=TASK_BLOCKED, project_id=self._project_id, task_id=blocked_id,
+                payload={"blocked_by": task_id},
+            ))
+        await self._event_bus.emit(BusEvent(
+            type=TASK_FAILED, project_id=self._project_id, task_id=task_id,
+            payload={"error": result.error},
+        ))
+
+    async def _finalize(self, failure: str | None) -> ProjectStatus:
+        cancelled = self._cancel_event.is_set()
+        if cancelled:
             status = ProjectStatus.CANCELLED
-        elif self._scheduler.has_failures():
+            event_type = PROJECT_CANCELLED
+        elif failure is not None or self._scheduler.has_failures():
             status = ProjectStatus.FAILED
+            event_type = PROJECT_FAILED
         else:
             status = ProjectStatus.COMPLETED
+            event_type = PROJECT_COMPLETED
 
+        now = datetime.now(timezone.utc)
         async with _db_module.async_session_factory() as db:
+            unfinished = await db.execute(
+                update(Task).where(
+                    Task.project_id == self._project_id,
+                    Task.status.in_([TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.RETRYING]),
+                ).values(
+                    status=TaskStatus.CANCELLED if cancelled else TaskStatus.BLOCKED,
+                    finished_at=now,
+                    error=failure,
+                ).returning(Task.id)
+            )
+            unfinished_ids = list(unfinished.scalars())
             await db.execute(
-                update(Project).where(Project.id == self._project_id).values(
-                    status=status, updated_at=datetime.now(timezone.utc),
+                update(AgentRun).where(
+                    AgentRun.project_id == self._project_id, AgentRun.status == RunStatus.RUNNING,
+                ).values(
+                    status=RunStatus.CANCELLED if cancelled else RunStatus.FAILED,
+                    finished_at=now,
+                    error=failure,
                 )
+            )
+            await db.execute(
+                update(Project).where(Project.id == self._project_id).values(status=status, updated_at=now)
             )
             await db.commit()
 
-        event_type = PROJECT_COMPLETED if status == ProjectStatus.COMPLETED else PROJECT_FAILED
+        for task_id in unfinished_ids:
+            await self._event_bus.emit(BusEvent(
+                type=TASK_CANCELLED if cancelled else TASK_BLOCKED,
+                project_id=self._project_id, task_id=task_id,
+            ))
+        payload = {"final_status": status.value}
+        if failure is not None:
+            payload["reason"] = failure
         await self._event_bus.emit(BusEvent(
-            type=event_type, project_id=self._project_id,
-            payload={"final_status": status.value},
+            type=event_type, project_id=self._project_id, payload=payload,
         ))
         self._memory.set_project_memory(self._project_id, "final_status", status.value)
         return status
 
-    async def _fail_project(self, reason: str) -> None:
-        """直接失败整个项目（超时/预算耗尽）。"""
-        self._scheduler.cancel_all()
-        async with _db_module.async_session_factory() as db:
-            await db.execute(
-                update(Project).where(Project.id == self._project_id).values(
-                    status=ProjectStatus.FAILED, updated_at=datetime.now(timezone.utc),
-                )
-            )
-            await db.commit()
-        await self._event_bus.emit(BusEvent(
-            type=PROJECT_FAILED, project_id=self._project_id,
-            payload={"reason": reason},
-        ))
-
-    async def _get_task_role(self, task_id: str) -> AgentRole | None:
-        async with _db_module.async_session_factory() as db:
-            task = await db.get(Task, task_id)
-            if task:
-                return task.agent_role if isinstance(task.agent_role, AgentRole) else AgentRole(task.agent_role)
-        return None
-
     async def _create_downstream_tasks(self, pm_task_id: str, pm_output: dict) -> None:
-        """PM 输出 → 创建后续任务（architect/backend/frontend/test/review/git）。"""
+        async with _db_module.async_session_factory() as db:
+            await self._insert_downstream_tasks(db, pm_task_id, pm_output)
+            await db.commit()
+        self._save_pm_output(pm_output)
+
+    async def _insert_downstream_tasks(self, db: AsyncSession, pm_task_id: str, pm_output: dict) -> None:
+        """在 PM 结果的同一事务中插入任务与依赖。"""
         tasks_def = pm_output.get("tasks", [])
         if not tasks_def:
             return
 
-        # 建立 role→task_id 映射（PM 输出用 role 名称作依赖占位符）
-        role_to_task_id: dict[str, str] = {"pm": pm_task_id}
+        role_to_task_id = {"pm": pm_task_id}
+        for tdef in tasks_def:
+            role = AgentRole(tdef["role"])
+            if role.value in role_to_task_id:
+                raise ValueError(f"duplicate task role: {role.value}")
+            task_id = uuid_str()
+            role_to_task_id[role.value] = task_id
+            db.add(Task(
+                id=task_id,
+                project_id=self._project_id,
+                agent_role=role,
+                title=tdef.get("title", f"{role.value} task"),
+                description=tdef.get("description", ""),
+                status=TaskStatus.PENDING,
+                input_data={
+                    **tdef,
+                    "project_name": pm_output.get("project_name", ""),
+                    "requirement": pm_output.get("requirement", ""),
+                },
+                max_retries=self._settings.task_max_retries,
+            ))
 
-        async with _db_module.async_session_factory() as db:
-            for i, tdef in enumerate(tasks_def):
-                role_str = tdef.get("role", "backend")
-                try:
-                    role = AgentRole(role_str)
-                except ValueError:
-                    logger.warning("Unknown role %s, defaulting to backend", role_str)
-                    role = AgentRole.BACKEND
+        await db.flush()
+        for tdef in tasks_def:
+            task_id = role_to_task_id[tdef["role"]]
+            for dep_role in dict.fromkeys(tdef.get("depends_on", [])):
+                dep_id = role_to_task_id.get(dep_role)
+                if dep_id:
+                    db.add(TaskDependency(task_id=task_id, depends_on_id=dep_id))
 
-                task_id = f"{self._project_id}-{role_str}-{i}"
-                task = Task(
-                    id=task_id,
-                    project_id=self._project_id,
-                    agent_role=role,
-                    title=tdef.get("title", f"{role_str} task"),
-                    description=tdef.get("description", ""),
-                    status=TaskStatus.PENDING,
-                    input_data={**tdef, "project_name": pm_output.get("project_name", ""), "requirement": pm_output.get("requirement", "")},
-                    max_retries=self._settings.task_max_retries,
-                )
-                db.add(task)
-                role_to_task_id[role_str] = task_id
-
-            await db.flush()
-
-            # 创建依赖关系（将 role 占位符替换为真实 task_id）
-            for i, tdef in enumerate(tasks_def):
-                role_str = tdef.get("role", "backend")
-                task_id = role_to_task_id[role_str]
-                for dep_role in tdef.get("depends_on", []):
-                    dep_id = role_to_task_id.get(dep_role)
-                    if dep_id:
-                        db.add(TaskDependency(task_id=task_id, depends_on_id=dep_id))
-
-            await db.commit()
-
-        # 写入 PM 记忆
+    def _save_pm_output(self, pm_output: dict) -> None:
         self._memory.set_project_memory(self._project_id, "pm_output", pm_output)
         self._memory.set_project_memory(self._project_id, "project_name", pm_output.get("project_name", ""))
-        logger.info("Created %d downstream tasks from PM output", len(tasks_def))
 
-    async def _rebuild_scheduler(self) -> None:
-        """从数据库重新加载任务并重建调度器。"""
+    async def _load_tasks(self) -> list[Task]:
         async with _db_module.async_session_factory() as db:
             result = await db.execute(
                 select(Task).where(Task.project_id == self._project_id)
                 .options(selectinload(Task.dependencies))
             )
-            tasks = list(result.scalars().all())
-        self._scheduler.build(tasks)
-        logger.info("Scheduler rebuilt with %d tasks", len(tasks))
-
-    async def _wait_any_result(self) -> tuple[str, AgentResult]:
-        """等待任意一个 pending 结果完成。"""
-        if not self._pending_results:
-            # 没有正在执行的任务但也没到终态：等待新任务被调度
-            await asyncio.sleep(0.1)
-            if self._scheduler.is_terminal():
-                raise asyncio.CancelledError()
-            # 重试
-            return await self._wait_any_result()
-
-        done, _ = await asyncio.wait(
-            self._pending_results.values(), return_when=asyncio.FIRST_COMPLETED
-        )
-        for future in done:
-            task_id = next(tid for tid, f in self._pending_results.items() if f is future)
-            del self._pending_results[task_id]
-            return task_id, future.result()
-        # 不可达
-        raise asyncio.CancelledError()
-
-    def _register_pending(self, task_id: str) -> None:
-        """为新入队的任务注册 pending future。"""
-        self._pending_results[task_id] = asyncio.get_event_loop().create_future()
+            return list(result.scalars())
