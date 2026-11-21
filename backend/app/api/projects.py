@@ -21,8 +21,8 @@ from app.models import (
 from app.schemas import (
     EventOut, ProjectCreate, ProjectDetailOut, ProjectOut, TaskOut,
 )
-from app.services.event_bus import EventBus, Event as BusEvent, read_project_events
-from app.services.event_types import PROJECT_CANCELLED, PROJECT_CREATED, TASK_CANCELLED
+from app.services.event_bus import EventBus, Event as BusEvent, read_project_events, store_project_event
+from app.services.event_types import PROJECT_CANCELLED, PROJECT_CREATED, PROJECT_FAILED, TASK_CANCELLED
 from app.services.memory import MemoryService
 from app.orchestrator import Orchestrator
 
@@ -247,6 +247,45 @@ async def _cancel_unstarted_project(project_id: str) -> None:
     await event_bus.emit(BusEvent(
         type=PROJECT_CANCELLED, project_id=project_id, payload={"final_status": ProjectStatus.CANCELLED.value},
     ))
+
+
+async def recover_interrupted_project_runs() -> None:
+    """单后端进程启动时，将上次中断的运行标为可重跑。"""
+    now = datetime.now(timezone.utc)
+    reason = "previous run interrupted by backend restart"
+    async with database.async_session_factory() as db:
+        result = await db.scalars(
+            update(Project).where(Project.status.in_([
+                ProjectStatus.ARCHITECTING, ProjectStatus.CODING,
+                ProjectStatus.TESTING, ProjectStatus.REVIEWING,
+            ])).values(status=ProjectStatus.FAILED, updated_at=now).returning(Project.id)
+        )
+        project_ids = list(result)
+        if not project_ids:
+            return
+
+        await db.execute(
+            update(Task).where(
+                Task.project_id.in_(project_ids),
+                Task.status.in_([TaskStatus.RUNNING, TaskStatus.RETRYING]),
+            ).values(status=TaskStatus.FAILED, error=reason, finished_at=now)
+        )
+        await db.execute(
+            update(Task).where(Task.project_id.in_(project_ids), Task.status == TaskStatus.PENDING)
+            .values(status=TaskStatus.BLOCKED, error=reason, finished_at=now)
+        )
+        await db.execute(
+            update(AgentRun).where(AgentRun.project_id.in_(project_ids), AgentRun.status == RunStatus.RUNNING)
+            .values(status=RunStatus.FAILED, error=reason, finished_at=now)
+        )
+        # 与状态变更同一次提交，重启后 REST 和 WebSocket 可以回放。
+        for project_id in project_ids:
+            await store_project_event(db, BusEvent(
+                type=PROJECT_FAILED, project_id=project_id, ts=now,
+                payload={"final_status": ProjectStatus.FAILED.value, "reason": reason},
+            ))
+        await db.commit()
+    logger.warning("Recovered %d interrupted project runs", len(project_ids))
 
 
 async def shutdown_project_runs(app: FastAPI) -> None:

@@ -1,4 +1,4 @@
-"""进程内事件发布与数据库历史查询。"""
+"""进程内事件发布与数据库事件读写。"""
 from __future__ import annotations
 
 import asyncio
@@ -37,6 +37,21 @@ class Event:
             "ts": timestamp.isoformat(),
             "seq": self.seq,
         }
+
+
+async def store_project_event(db: AsyncSession, event: Event) -> int:
+    row = StoredEvent(
+        project_id=event.project_id,
+        task_id=event.task_id,
+        run_id=event.run_id,
+        type=event.type,
+        payload=event.payload,
+        ts=event.ts,
+    )
+    db.add(row)
+    await db.flush()
+    row.seq = row.id
+    return row.id
 
 
 async def read_project_events(db: AsyncSession, project_id: str, after_seq: int = 0) -> list[Event]:

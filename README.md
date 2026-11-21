@@ -31,6 +31,8 @@ docker compose up --build   # backend + frontend + postgres + redis
 
 打开 http://localhost/（nginx 托管前端并反代后端 API/WebSocket）。
 
+编排任务和 WebSocket 订阅由单个后端进程管理。后端异常退出后，重启会把中断的项目标为失败。点击「重新运行」可保留已成功的任务，并继续执行未完成的任务。
+
 ## 📚 文档
 
 - [docs/architecture.md](docs/architecture.md) — 系统总体架构（15 个设计主题）

@@ -11,7 +11,10 @@ from app.agents import AgentResult, BaseAgent, ScriptedAgent
 from app.agents import registry as registry_module
 from app.config import get_settings
 from app.main import app
-from app.models import AgentRole, AgentRun, Event as StoredEvent, RunStatus, TaskStatus
+from app.models import (
+    AgentRole, AgentRun, Event as StoredEvent, Project, ProjectStatus,
+    RunStatus, Task, TaskDependency, TaskStatus,
+)
 from app.orchestrator import AgentRegistry
 from app.services.event_bus import event_bus
 
@@ -129,6 +132,80 @@ async def test_failed_project_rerun_preserves_completed_tasks(client, isolated_p
     assert (pm.run_count, architect.run_count, backend.run_count) == (1, 1, 1)
     assert all(task["status"] == "success" and task["error"] is None for task in project["tasks"])
     assert {task["id"] for task in project["tasks"]} == {task["id"] for task in tasks.values()}
+
+
+async def test_startup_recovers_interrupted_project_and_allows_rerun(isolated_project_db):
+    # Seed the committed state a killed backend leaves behind.
+    await database.init_db()
+    async with database.async_session_factory() as db:
+        workspace = get_settings().workspace_root
+        interrupted = Project(name="interrupted", workspace_path=workspace, status=ProjectStatus.CODING)
+        unstarted = Project(name="unstarted", workspace_path=workspace)
+        completed = Project(name="completed", workspace_path=workspace, status=ProjectStatus.COMPLETED)
+        db.add_all([interrupted, unstarted, completed])
+        await db.flush()
+        project_id = interrupted.id
+        pm_output = {"project_name": "interrupted"}
+        pm = Task(
+            project_id=project_id, agent_role=AgentRole.PM, title="plan",
+            status=TaskStatus.SUCCESS, output_data=pm_output,
+        )
+        backend = Task(
+            project_id=project_id, agent_role=AgentRole.BACKEND, title="build",
+            status=TaskStatus.RUNNING,
+        )
+        review = Task(project_id=project_id, agent_role=AgentRole.REVIEW, title="review")
+        db.add_all([pm, backend, review])
+        await db.flush()
+        pm_id, backend_id, review_id = pm.id, backend.id, review.id
+        started_event = StoredEvent(project_id=project_id, type="project_started")
+        db.add_all([
+            TaskDependency(task_id=backend_id, depends_on_id=pm_id),
+            TaskDependency(task_id=review_id, depends_on_id=backend_id),
+            AgentRun(project_id=project_id, task_id=pm_id, agent_role=AgentRole.PM, status=RunStatus.SUCCESS),
+            AgentRun(project_id=project_id, task_id=backend_id, agent_role=AgentRole.BACKEND),
+            started_event,
+        ])
+        await db.commit()
+        started_seq = started_event.id
+
+    path = f"/api/projects/{project_id}"
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
+            recovered = (await http.get(path)).json()
+            assert recovered["status"] == "failed"
+            tasks = {task["id"]: task for task in recovered["tasks"]}
+            assert tasks[pm_id]["status"] == "success"
+            assert tasks[pm_id]["output_data"] == pm_output
+            assert tasks[backend_id]["status"] == "failed"
+            assert tasks[review_id]["status"] == "blocked"
+            assert tasks[backend_id]["error"] and tasks[backend_id]["finished_at"]
+            assert tasks[review_id]["dependency_ids"] == [backend_id]
+            for project, status in [(unstarted, "planning"), (completed, "completed")]:
+                assert (await http.get(f"/api/projects/{project.id}")).json()["status"] == status
+            history = (await http.get(f"{path}/events", params={"after_seq": started_seq + 1})).json()
+            assert len(history) == 1
+            assert history[0]["type"] == "project_failed"
+            assert history[0]["payload"]["reason"] == tasks[backend_id]["error"]
+
+        async with database.async_session_factory() as db:
+            runs = {run.task_id: run for run in await db.scalars(select(AgentRun))}
+            assert runs[pm_id].status == RunStatus.SUCCESS
+            assert runs[backend_id].status == RunStatus.FAILED
+            assert runs[backend_id].finished_at and runs[backend_id].error
+
+    build_agent = ScriptedAgent(AgentRole.BACKEND)
+    review_agent = ScriptedAgent(AgentRole.REVIEW)
+    isolated_project_db.register(build_agent)
+    isolated_project_db.register(review_agent)
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
+            assert (await http.get(f"{path}/events", params={"after_seq": started_seq + 1})).json() == history
+            assert (await http.post(f"{path}/run")).status_code == 200
+            finished = await wait_for_status(http, path, "completed")
+            assert {task["id"] for task in finished["tasks"]} == {pm_id, backend_id, review_id}
+            assert all(task["status"] == "success" for task in finished["tasks"])
+            assert (build_agent.run_count, review_agent.run_count) == (1, 1)
 
 
 async def test_task_timeout_does_not_report_completion(client, isolated_project_db, monkeypatch):
